@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 
 import phenikaa_exporter as pe
+import phenikaa_login as pl
 
 
 SAMPLE_EVENTS = [
@@ -60,6 +61,26 @@ class CryptoProtocolTests(unittest.TestCase):
         blob = pe.xor_b64_encode(json.dumps(payload), "AzzS")
         html = f'<script>AXYZCLRVN = () => "{blob}"</script>'
         self.assertEqual(pe.parse_bootstrap_html(html), payload)
+
+
+class BrowserLoginCaptureTests(unittest.TestCase):
+    def test_session_from_response_decodes_bootstrap_page(self):
+        payload = {"userId": "student-id", "tokenJWT": "secret-token"}
+        blob = pe.xor_b64_encode(json.dumps(payload), "AzzS")
+        html = f'<html><script>AXYZCLRVN = () => "{blob}"</script></html>'
+        self.assertEqual(pl.session_from_response("https://portal/index.aspx", html), payload)
+
+    def test_session_from_response_ignores_pages_without_marker_or_valid_blob(self):
+        self.assertIsNone(pl.session_from_response("https://portal/x", "<p>login page</p>"))
+        blob = pe.xor_b64_encode('{"broken": true}', "AzzS")
+        html = f'<script>AXYZCLRVN = () => "{blob}"</script>'
+        self.assertIsNone(pl.session_from_response("https://portal/index.aspx", html))
+
+    def test_token_from_authorization_strips_bearer_prefix_only(self):
+        self.assertEqual(pl.token_from_authorization("Bearer abc.def.ghi"), "abc.def.ghi")
+        self.assertIsNone(pl.token_from_authorization("bearer abc"))
+        self.assertIsNone(pl.token_from_authorization("Bearer "))
+        self.assertIsNone(pl.token_from_authorization(None))
 
 
 class EventTests(unittest.TestCase):

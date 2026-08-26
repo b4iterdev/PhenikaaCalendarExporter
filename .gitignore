@@ -2,11 +2,15 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+*.egg-info/
 
 # Authentication material — never commit
 .auth.json
 auth.json
 *bootstrap*.html
+
+# Persistent login browser profile (contains portal session cookies)
+.browser-profile/
 
 # Calendar data can contain private academic information
 exports/

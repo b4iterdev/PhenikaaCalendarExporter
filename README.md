@@ -6,11 +6,11 @@ A reproducible command-line project that reads the authenticated Phenikaa studen
 - `.ics` — timezone-aware calendar import for Apple Calendar, Google Calendar and Outlook.
 - `.json` — normalized source records for auditing and future processing.
 
-The project does **not** automate login or store a password. You sign in through the official portal, then provide a short-lived authenticated bootstrap source.
+The project does **not** store a password and never enters credentials on your behalf. You sign in through the official portal yourself; the exporter only reads the session data your own logged-in browser already receives.
 
 ## What was verified
 
-The API workflow was verified against the logged-in student portal on 26 August 2026. A current-semester request returned 70 events covering 4 August–28 October 2026: 65 classes and 5 exams. The committed tests also exercise encryption/decryption, Chromium-cache extraction, a local end-to-end API exchange, deduplication, XLSX structure, ICS timezone/event structure, UTF-8 line folding, and the CLI's three-file output.
+The API workflow was verified against the logged-in student portal on 26 August 2026. A current-semester request returned 70 events covering 4 August–28 October 2026: 65 classes and 5 exams. The committed tests also exercise encryption/decryption, Chromium-cache extraction, automated-login capture helpers (bootstrap-response decoding and `Authorization`-header parsing), a local end-to-end API exchange, deduplication, XLSX structure, ICS timezone/event structure, UTF-8 line folding, and the CLI's three-file output.
 
 ## Requirements
 
@@ -18,11 +18,12 @@ The API workflow was verified against the logged-in student portal on 26 August 
 - Network access to `qldtbeta.phenikaa-uni.edu.vn`.
 - A currently authenticated Phenikaa portal session.
 - `openpyxl` 3.1.5 for Excel output.
+- Optional: `playwright` (plus its Chromium build) for the automated browser login.
 
 ## Setup
 
 ```bash
-cd /Users/b4iterdev/PhenikaaCalendarExporter
+cd /path/to/PhenikaaCalendarExporter
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
@@ -37,7 +38,100 @@ python -m pip install -e .
 
 Without installation, invoke `python phenikaa_exporter.py ...` directly.
 
-## Recommended authentication method: local Chromium cache
+## Quick start
+
+Every command you need, in order:
+
+```bash
+# 1. One-time setup
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+
+# 2. One-time browser-login support (optional but recommended)
+python -m pip install -e ".[login]"
+playwright install chromium        # downloads the managed Chromium (~170MB)
+
+# 3. Export with automated sign-in — a window opens, you sign in once
+python phenikaa_exporter.py \
+  --start 2026-08-01 \
+  --end 2027-01-31 \
+  --browser-login \
+  --out-dir exports
+
+# 4. Later reruns while the captured token is still valid (no sign-in)
+python phenikaa_exporter.py \
+  --start 2026-08-01 \
+  --end 2027-01-31 \
+  --auth-json .auth.json \
+  --out-dir exports
+
+# 5. Run the test suite at any time
+python -m unittest discover -s tests -v
+```
+
+### Command-line options reference
+
+Exactly one authentication source is required; everything else is optional.
+
+| Option | Purpose |
+|---|---|
+| `--browser-login` | Open a sign-in window, capture credentials into `.auth.json`, then export immediately |
+| `--auth-json PATH` | Read credentials from an existing JSON file (default target: `.auth.json`) |
+| `--bootstrap-html PATH` | Decode credentials from a saved authenticated `index.aspx` response |
+| `--cache-dir PATH` | Recover credentials from a Chromium disk cache (`Cache_Data`) |
+| `--start YYYY-MM-DD` | Inclusive range start (required) |
+| `--end YYYY-MM-DD` | Inclusive range end (required) |
+| `--out-dir DIR` | Output directory (default: `exports`) |
+| `--prefix NAME` | Output filename prefix (default: `phenikaa_calendar`) |
+| `--calendar-name NAME` | Calendar display name written into the ICS |
+
+## Recommended authentication method: automated browser login
+
+The exporter can open its own Chromium window at the portal. You sign in once; `userId` and `tokenJWT` are captured automatically from the page's own network traffic — no DevTools, no copying.
+
+One-time setup:
+
+```bash
+python -m pip install -e ".[login]"
+playwright install chromium
+```
+
+Then run with `--browser-login` (dates as usual):
+
+```bash
+python phenikaa_exporter.py \
+  --start 2026-08-01 \
+  --end 2027-01-31 \
+  --browser-login \
+  --out-dir exports
+```
+
+How it works: a headed Chromium window opens at `index.aspx#lichhoc`. Sign in normally. The exporter watches responses for the server-rendered `AXYZCLRVN` bootstrap blob and decodes it, falling back to in-page `window.edu.system.userId` evaluation and the `Authorization` header of calendar API requests. Once both values are captured it writes `.auth.json` (permissions 600) and continues straight into the export. Tokens are never printed.
+
+A persistent profile in `.browser-profile/` keeps you signed in between runs; while the portal session is valid, later runs skip the sign-in entirely. The directory is ignored by Git because it contains live session cookies. Delete it whenever you want to force a fresh sign-in.
+
+### Troubleshooting browser login
+
+| Symptom | Fix |
+|---|---|
+| `playwright is required for --browser-login` | Run `python -m pip install -e ".[login]"` then `playwright install chromium`. |
+| Browser fails to launch on Linux (missing libraries) | Run `playwright install-deps chromium`, then retry. |
+| `timed out waiting for sign-in` (5 minutes) | Rerun the command and finish signing in sooner; the window stays open until capture succeeds or the timeout hits. |
+| Sign-in window appears but asks for login every run | The profile is stale — delete `.browser-profile/` and run again. |
+| Export fails with HTTP `401` after a successful earlier run | The portal rotated your token; simply rerun with `--browser-login` to refresh `.auth.json`. |
+| Window opens behind other windows | Look for a Chromium window titled like the Phenikaa portal; bring it forward and sign in there. |
+
+### Security notes for generated files
+
+- `.auth.json` is written automatically with permissions `600` and contains your bearer token. It is git-ignored; never commit it, paste it into chat, or screenshot it.
+- `.browser-profile/` holds **live portal session cookies** — treat it like a password. Deleting the directory signs you out locally and forces a fresh sign-in next run.
+- Exports in `exports/` contain private academic information and are git-ignored by default.
+
+## Alternative authentication methods
+
+### Local Chromium cache
 
 1. Open the portal and sign in normally:
    `https://qldtbeta.phenikaa-uni.edu.vn/congsinhvien/index.aspx#lichhoc`
@@ -56,8 +150,6 @@ python phenikaa_exporter.py \
 ```
 
 The cache is read locally. The decoded token remains in process memory and is never printed or written by the exporter.
-
-## Alternative authentication sources
 
 ### Saved authenticated HTML
 
@@ -192,7 +284,7 @@ source .venv/bin/activate
 python -m unittest discover -s tests -v
 ```
 
-The API test uses a local HTTP server and does not contact Phenikaa or require credentials. A separate live smoke run is needed to prove that the current internal API contract still works.
+The API test uses a local HTTP server and does not contact Phenikaa or require credentials. `BrowserLoginCaptureTests` covers the pure capture helpers used by `--browser-login` (bootstrap-response decoding, `Authorization`-header parsing) without launching a browser. A separate live smoke run is needed to prove that the current internal API contract and the interactive login flow still work.
 
 ## Internal protocol
 
@@ -203,6 +295,6 @@ See [SECURITY.md](SECURITY.md) before handling tokens or sharing exports, and [d
 ## Known limitations
 
 - The API is internal and may change without notice.
-- Authentication expires; the project intentionally does not capture credentials or automate Microsoft login.
+- Authentication expires; the project never stores passwords or types credentials for you — even `--browser-login` waits for you to sign in manually before capturing the resulting session.
 - “Current semester” is represented by an explicit broad date range, not an official semester metadata endpoint.
 - Generated exports contain private academic information and are ignored by Git by default.

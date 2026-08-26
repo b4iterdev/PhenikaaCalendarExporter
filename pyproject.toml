@@ -5,6 +5,9 @@ description = "Export an authenticated Phenikaa learning calendar to XLSX, ICS, 
 requires-python = ">=3.9"
 dependencies = ["openpyxl==3.1.5"]
 
+[project.optional-dependencies]
+login = ["playwright>=1.40"]
+
 [project.scripts]
 phenikaa-calendar = "phenikaa_exporter:main"
 

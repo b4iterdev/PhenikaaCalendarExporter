@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -333,6 +334,13 @@ def _load_session(args: argparse.Namespace) -> dict[str, Any]:
         return session
     if args.bootstrap_html:
         return parse_bootstrap_html(Path(args.bootstrap_html).expanduser().read_text(encoding="utf-8"))
+    if args.browser_login:
+        import phenikaa_login
+
+        session = phenikaa_login.login_flow(args.profile_dir)
+        saved = phenikaa_login.save_auth_json(session)
+        print(f"Credentials captured and saved to {saved} (mode 600).", file=sys.stderr)
+        return session
     return extract_auth_from_cache(args.cache_dir)
 
 
@@ -344,7 +352,9 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("--auth-json", help="Private JSON containing userId and tokenJWT")
     auth.add_argument("--bootstrap-html", help="Authenticated saved index.aspx HTML containing AXYZCLRVN")
     auth.add_argument("--cache-dir", help="Chromium Cache_Data directory containing the authenticated index page")
+    auth.add_argument("--browser-login", action="store_true", help="Open a sign-in window, capture credentials into .auth.json automatically, then continue exporting")
     parser.add_argument("--out-dir", default="exports", help="Output directory (default: exports)")
+    parser.add_argument("--profile-dir", default=".browser-profile", help=argparse.SUPPRESS)
     parser.add_argument("--prefix", default="phenikaa_calendar", help="Output filename prefix")
     parser.add_argument("--calendar-name", default="Phenikaa Learning Calendar", help="ICS calendar display name")
     parser.add_argument("--base-url", default=PORTAL_BASE_URL, help=argparse.SUPPRESS)
