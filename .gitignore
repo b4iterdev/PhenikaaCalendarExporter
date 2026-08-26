@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Authentication material — never commit
+.auth.json
+auth.json
+*bootstrap*.html
+
+# Calendar data can contain private academic information
+exports/
+*.ics
+*.xlsx
+phenikaa_calendar.json
+
+# Test/tool caches
+.pytest_cache/
+.coverage

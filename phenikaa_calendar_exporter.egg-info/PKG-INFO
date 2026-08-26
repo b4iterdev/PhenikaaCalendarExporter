@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: phenikaa-calendar-exporter
+Version: 1.0.0
+Summary: Export an authenticated Phenikaa learning calendar to XLSX, ICS, and JSON
+Requires-Python: >=3.9
+Requires-Dist: openpyxl==3.1.5

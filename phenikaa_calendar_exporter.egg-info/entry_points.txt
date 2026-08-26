@@ -1,0 +1,2 @@
+[console_scripts]
+phenikaa-calendar = phenikaa_exporter:main
