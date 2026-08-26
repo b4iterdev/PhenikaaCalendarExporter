@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+*.egg-info/
 
 # Authentication material — never commit
 .auth.json
