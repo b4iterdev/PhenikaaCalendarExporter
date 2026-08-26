@@ -75,16 +75,63 @@ The HTML must contain `AXYZCLRVN = () => "..."`. A login page or DOM copy withou
 
 ### Private authentication JSON
 
-Create `.auth.json` from `auth.example.json`:
+#### Get `userId` with DevTools
+
+1. Sign in and keep the authenticated portal page open.
+2. Open **DevTools → Console**.
+3. Run:
+
+```js
+window.edu?.system?.userId;
+```
+
+The result is the portal's internal student identifier, normally a 32-character hexadecimal string. Copy it without displaying it again with:
+
+```js
+copy(window.edu.system.userId);
+```
+
+If `edu.system.userId` is not initialized, reload the authenticated `index.aspx` page, wait for it to finish loading, and try again. A fallback using the portal's own bootstrap decoder is:
+
+```js
+copy(JSON.parse(AD(AXYZCLRVN(), "AzzS")).userId);
+```
+
+This `userId` is used by the API as both `strQLSV_NguoiHoc_Id` and `strNguoiThucHien_Id`. It is not the visible student number and is not derived from the bearer token.
+
+#### Get `tokenJWT` from the Network panel
+
+1. Open **DevTools → Network** while signed in.
+2. Reload the portal or open **Lịch học** so the calendar API runs.
+3. Select an authenticated request, preferably the request ending in:
+
+```text
+/sinhvienapi3/api/SV_ThongTin_MH/DSA4BRINKCIpAiAPKSAv
+```
+
+4. Open **Headers → Request Headers**.
+5. Find:
+
+```text
+Authorization: Bearer <token>
+```
+
+6. Copy only the text after `Bearer `. Do **not** include the word `Bearer` or the following space in `tokenJWT`.
+
+If the browser hides the header value, right-click the request and use **Copy → Copy as cURL**, paste it only into a private local text editor, take the authorization header's value after the scheme name, and immediately delete the temporary text. Do not execute or share the copied cURL command because it contains an active credential.
+
+#### Create `.auth.json`
+
+Create `.auth.json` from `auth.example.json` using the two values:
 
 ```json
 {
-  "userId": "...",
-  "tokenJWT": "..."
+  "userId": "YOUR_32_CHARACTER_INTERNAL_USER_ID",
+  "tokenJWT": "YOUR_TOKEN_WITHOUT_THE_BEARER_PREFIX"
 }
 ```
 
-Protect and use it:
+JSON does not support comments or trailing commas. Protect and use the file:
 
 ```bash
 chmod 600 .auth.json
@@ -95,7 +142,7 @@ python phenikaa_exporter.py \
   --out-dir exports
 ```
 
-`.auth.json` is ignored by Git. Never commit it.
+`.auth.json` is ignored by Git. Never commit it, paste either value into chat, or include it in screenshots. The bearer token is short-lived; if the API returns HTTP `401`, sign in again and replace `tokenJWT` with the new value.
 
 ## Choosing the date range
 
