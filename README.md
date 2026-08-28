@@ -96,6 +96,8 @@ A GitHub Actions workflow (`.github/workflows/docker.yml`) runs the offline test
 
 Pull requests build the image but skip publishing, so forks and external contributors never need registry credentials.
 
+Images are built for both `linux/amd64` and `linux/arm64` (via QEMU), so the same tags run natively on x86 servers and ARM hosts like Apple Silicon or AWS Graviton; Docker pulls the matching architecture automatically.
+
 ## Quick start
 
 Every command you need, in order:
