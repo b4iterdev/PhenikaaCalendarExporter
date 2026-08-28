@@ -20,7 +20,18 @@ Treat the token exactly like a password while it is valid. The exporter never lo
 
 ## What the project stores
 
-The exporter writes only the requested JSON, XLSX and ICS files. It does not save the bearer token. `--cache-dir` reads the local cache in place and keeps the decoded session in process memory only.
+The command-line exporter writes only the requested JSON, XLSX and ICS files. It does not save the bearer token unless `--browser-login` is used, which writes the documented private `.auth.json`. `--cache-dir` keeps the decoded session in process memory only.
+
+Server mode intentionally persists more sensitive state under `server-state/`:
+
+- JWTs are encrypted in SQLite with the Fernet key supplied through `PHENIKAA_SERVER_KEY`.
+- Per-session Playwright profiles contain live Phenikaa cookies used for silent token refresh.
+- JSON and ICS exports contain private academic data.
+- A 0600 random secret signs OIDC transactions and application cookies.
+
+Protect and back up the Fernet key separately. Losing it makes stored JWTs unreadable; exposing it allows their decryption. Deleting a session through the dashboard removes its database row, browser profile, and exports. Deleting `server-state/` wipes all local server data.
+
+Run the server behind HTTPS, keep its direct listener private, and configure a generic OIDC provider. Never expose `PHENIKAA_SERVER_AUTH=disabled`. `PHENIKAA_BROWSER_NO_SANDBOX=1` weakens Chromium isolation and is only appropriate inside another trusted sandbox such as a locked-down container.
 
 ## Network behavior
 

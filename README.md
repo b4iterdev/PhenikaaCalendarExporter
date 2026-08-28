@@ -38,6 +38,36 @@ python -m pip install -e .
 
 Without installation, invoke `python phenikaa_exporter.py ...` directly.
 
+## Server mode
+
+Server mode keeps separate Phenikaa browser profiles for OIDC-authenticated users, encrypts captured JWTs in SQLite, refreshes expired tokens through retained portal cookies, and writes each session's `calendar.json` and `calendar.ics` daily. Users can configure the calendar date range from the dashboard.
+
+Install and configure it behind an HTTPS reverse proxy:
+
+```bash
+python -m pip install -e ".[server]"
+playwright install chromium
+
+export PHENIKAA_SERVER_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+export PHENIKAA_SERVER_BASE_URL="https://calendar.example.edu"
+export PHENIKAA_OIDC_ISSUER="https://identity.example.edu"
+export PHENIKAA_OIDC_CLIENT_ID="phenikaa-calendar"
+export PHENIKAA_OIDC_CLIENT_SECRET="..."
+
+phenikaa-calendar-server --host 127.0.0.1 --port 8416
+```
+
+Register `${PHENIKAA_SERVER_BASE_URL}/auth/callback` as the OIDC redirect URI. The provider must expose standard discovery metadata and RS256 JWKS keys. OIDC identities are keyed by the stable `sub` claim.
+
+Private state defaults to `server-state/`:
+
+- `server.db` stores users, sessions, encrypted JWTs, and sync history.
+- `profiles/<session-id>/` stores live Phenikaa cookies for silent token refresh.
+- `exports/<session-id>/` stores the latest JSON and ICS files.
+- `cookie.secret` signs application and OIDC transaction cookies.
+
+The default sync interval is 24 hours. Set `PHENIKAA_SERVER_SYNC_INTERVAL_HOURS` to change it. The HTTPS reverse proxy must apply per-IP request limits, connection limits, body-size limits, and timeouts for long-lived login streams; configure it not to log `/auth/callback` query strings. In a container that cannot use Chromium's sandbox, `PHENIKAA_BROWSER_NO_SANDBOX=1` is available only for an otherwise trusted, isolated deployment. For local development, `PHENIKAA_SERVER_AUTH=disabled` bypasses OIDC and must never be exposed to a network.
+
 ## Quick start
 
 Every command you need, in order:
@@ -284,7 +314,7 @@ source .venv/bin/activate
 python -m unittest discover -s tests -v
 ```
 
-The API test uses a local HTTP server and does not contact Phenikaa or require credentials. `BrowserLoginCaptureTests` covers the pure capture helpers used by `--browser-login` (bootstrap-response decoding, `Authorization`-header parsing) without launching a browser. A separate live smoke run is needed to prove that the current internal API contract and the interactive login flow still work.
+Install `.[server]` to execute server-mode tests; without that optional extra, unittest reports the server test module as skipped. The API tests use local HTTP servers and do not contact Phenikaa or require credentials. `BrowserLoginCaptureTests` covers the pure capture helpers used by `--browser-login` without launching a browser. A separate live smoke run is needed to prove that the current internal API contract and the interactive login flow still work.
 
 ## Internal protocol
 
