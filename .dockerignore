@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.omo
+.playwright-mcp
+__pycache__
+*.pyc
+dist
+build
+docs
+tests
+server-state
+exports
+.browser-profile
+.auth.json
+auth.json
+*.db

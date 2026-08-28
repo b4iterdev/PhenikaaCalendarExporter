@@ -68,6 +68,34 @@ Private state defaults to `server-state/`:
 
 The default sync interval is 24 hours. Set `PHENIKAA_SERVER_SYNC_INTERVAL_HOURS` to change it. The HTTPS reverse proxy must apply per-IP request limits, connection limits, body-size limits, and timeouts for long-lived login streams; configure it not to log `/auth/callback` query strings. In a container that cannot use Chromium's sandbox, `PHENIKAA_BROWSER_NO_SANDBOX=1` is available only for an otherwise trusted, isolated deployment. For local development, `PHENIKAA_SERVER_AUTH=disabled` bypasses OIDC and must never be exposed to a network.
 
+### Docker deployment
+
+The [`Dockerfile`](Dockerfile) builds a self-contained server image: Python 3.12, the package installed from source, and a managed Chromium under `/opt/ms-playwright` for streamed logins and silent token refresh. It runs as an unprivileged `phenikaa` user, stores all private state in the `/data` volume, listens on `0.0.0.0:8416`, and ships a `/healthz`-based `HEALTHCHECK`. Containers cannot use Chromium's sandbox, so the image sets `PHENIKAA_BROWSER_NO_SANDBOX=1` — keep the deployment otherwise isolated as documented above.
+
+```bash
+docker build -t phenikaa-calendar-server .
+
+docker run -d --name phenikaa-calendar \
+  -p 8416:8416 \
+  -v phenikaa-data:/data \
+  -e PHENIKAA_SERVER_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
+  -e PHENIKAA_SERVER_BASE_URL="https://calendar.example.edu" \
+  -e PHENIKAA_OIDC_ISSUER="https://identity.example.edu" \
+  -e PHENIKAA_OIDC_CLIENT_ID="phenikaa-calendar" \
+  -e PHENIKAA_OIDC_CLIENT_SECRET="..." \
+  phenikaa-calendar-server
+```
+
+Generate the Fernet key once and reuse it for the lifetime of the `/data` volume; changing it makes every stored session token undecryptable. The `/data` volume holds `server.db`, browser profiles with live portal cookies, and exports — treat its contents and its backups as secrets.
+
+A GitHub Actions workflow (`.github/workflows/docker.yml`) runs the offline test suite and then builds the image on every push or pull request touching the server code, the `Dockerfile`, or the workflow itself. On pushes (and manual dispatches) it publishes to GHCR:
+
+- `ghcr.io/b4iterdev/phenikaa-calendar-exporter:main` / `:dev-server` — branch tag
+- `ghcr.io/b4iterdev/phenikaa-calendar-exporter:main-<sha>` / `:dev-server-<sha>` — immutable commit tag
+- `ghcr.io/b4iterdev/phenikaa-calendar-exporter:latest` — default branch only
+
+Pull requests build the image but skip publishing, so forks and external contributors never need registry credentials.
+
 ## Quick start
 
 Every command you need, in order:
