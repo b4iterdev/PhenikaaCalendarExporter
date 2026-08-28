@@ -83,7 +83,7 @@ docker run -d --name phenikaa-calendar \
   -e PHENIKAA_OIDC_ISSUER="https://identity.example.edu" \
   -e PHENIKAA_OIDC_CLIENT_ID="phenikaa-calendar" \
   -e PHENIKAA_OIDC_CLIENT_SECRET="..." \
-  phenikaa-calendar-server
+  ghcr.io/b4iterdev/phenikaa-calendar-exporter:dev-server
 ```
 
 Generate the Fernet key once and reuse it for the lifetime of the `/data` volume; changing it makes every stored session token undecryptable. The `/data` volume holds `server.db`, browser profiles with live portal cookies, and exports — treat its contents and its backups as secrets.

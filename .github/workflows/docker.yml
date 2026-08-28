@@ -15,6 +15,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: b4iterdev/phenikaa-calendar-exporter
 
 jobs:
   test:
@@ -39,10 +40,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve lowercase image name
-        run: echo "IMAGE_NAME=${IMAGE_NAME,,}" >> "$GITHUB_ENV"
-        env:
-          IMAGE_NAME: ${{ github.repository }}
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
