@@ -118,14 +118,18 @@ class OidcClient:
             "code": code,
             "redirect_uri": self.redirect_uri,
             "client_id": self.client_id,
-            "client_secret": self.client_secret,
             "code_verifier": code_verifier,
         }).encode("ascii")
         request = urllib.request.Request(
             str(self.metadata()["token_endpoint"]),
             data=body,
             method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Authorization": "Basic " + base64.b64encode(
+                    f"{self.client_id}:{self.client_secret}".encode("utf-8")
+                ).decode("ascii"),
+            },
         )
         with urllib.request.urlopen(request, timeout=15) as response:
             token_response = json.loads(response.read())
