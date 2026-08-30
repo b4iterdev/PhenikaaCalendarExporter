@@ -19,6 +19,9 @@ from server.db import Database, STATUS_ACTIVE, STATUS_NEEDS_HUMAN
 from server.refresh import ProfileLocks, silent_refresh
 
 
+GoogleSyncer = Callable[[str, list[dict[str, Any]]], Any]
+
+
 @dataclass(frozen=True)
 class SyncResult:
     ok: bool
@@ -39,6 +42,7 @@ class SyncEngine:
         locks: ProfileLocks | None = None,
         fetcher: Callable[..., list[dict[str, Any]]] = fetch_calendar,
         refresher: Callable[..., dict[str, Any]] = silent_refresh,
+        google_syncer: GoogleSyncer | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -46,6 +50,7 @@ class SyncEngine:
         self.locks = locks or ProfileLocks()
         self.fetcher = fetcher
         self.refresher = refresher
+        self.google_syncer = google_syncer
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._forced: set[str] = set()
@@ -133,6 +138,14 @@ class SyncEngine:
                     raise LoginTimeout("silent refresh did not restore the Phenikaa session") from error
             self._write_outputs(session_id, events)
             detail = f"saved {len(events)} events"
+            if self.google_syncer is not None:
+                try:
+                    google_result = self.google_syncer(session_id, events)
+                    if getattr(google_result, "attempted", False):
+                        google_detail = str(getattr(google_result, "detail", ""))
+                        detail = detail + ("; " + google_detail if google_detail else "")
+                except Exception as error:
+                    detail = detail + f"; Google Calendar sync failed: {error.__class__.__name__}: {str(error)[:160]}"
             self.database.mark_synced(session_id, ok=True, detail=detail)
             self.database.finish_sync_run(run_id, ok=True, refreshed_token=refreshed, events=len(events), detail=detail)
             return SyncResult(True, len(events), refreshed, detail)

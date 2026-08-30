@@ -8,19 +8,35 @@ import urllib.parse
 from datetime import date
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Protocol
 
 from phenikaa_login import LoginTimeout
 
 from server.config import ServerConfig, academic_year_range
 from server.crypto import TokenVault, token_fingerprint
 from server.db import Database, STATUS_NEEDS_HUMAN, STATUS_PENDING_LOGIN
-from server.login_broker import LoginAttempt, LoginBroker, validate_event
+from server.login_broker import LoginBroker, validate_event
 from server.oidc import OidcClient, SignedSessions, new_authorization_state
-from server.sync import SyncEngine
 
 APP_COOKIE = "phenikaa_server_session"
 OIDC_COOKIE = "phenikaa_oidc_transaction"
+GOOGLE_OAUTH_COOKIE = "phenikaa_google_oauth_transaction"
+
+
+class GoogleCalendarWebService(Protocol):
+    def authorization_url(self, state: str) -> str:
+        raise NotImplementedError
+
+    def exchange_code(self, session_id: str, code: str) -> None:
+        pass
+
+    def disconnect(self, session_id: str) -> None:
+        pass
+
+
+class SyncRequester(Protocol):
+    def request_sync(self, session_id: str) -> None:
+        pass
 
 
 class ServerApplication:
@@ -31,8 +47,9 @@ class ServerApplication:
         vault: TokenVault,
         signed_sessions: SignedSessions,
         broker: LoginBroker,
-        sync_engine: SyncEngine,
+        sync_engine: SyncRequester,
         oidc: OidcClient | None,
+        google: GoogleCalendarWebService | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -41,6 +58,7 @@ class ServerApplication:
         self.broker = broker
         self.sync_engine = sync_engine
         self.oidc = oidc
+        self.google = google
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         application = self
@@ -74,6 +92,9 @@ class ServerApplication:
         if path == "/auth/callback":
             self._finish_oidc(handler, urllib.parse.parse_qs(parsed.query))
             return
+        if path == "/auth/google/callback":
+            self._finish_google_oauth(handler, urllib.parse.parse_qs(parsed.query))
+            return
         identity = self._identity(handler)
         if identity is None:
             self._redirect(handler, "/auth/login")
@@ -95,6 +116,9 @@ class ServerApplication:
                 return
             if len(parts) == 3 and parts[2] == "status.json":
                 self._status(handler, session)
+                return
+            if len(parts) == 4 and parts[2] == "google" and parts[3] == "connect":
+                self._start_google_oauth(handler, session)
                 return
             if len(parts) == 4 and parts[2] == "download" and parts[3] in ("calendar.json", "calendar.ics"):
                 self._download(handler, str(session["id"]), parts[3])
@@ -186,6 +210,20 @@ class ServerApplication:
                     lock.release()
                 self._redirect(handler, "/")
                 return
+        if len(parts) == 4 and parts[0] == "sessions" and parts[2] == "google" and parts[3] == "disconnect":
+            session = self._owned_session(handler, parts[1], int(user["id"]))
+            if session is None:
+                return
+            if self.google is None:
+                self._error(handler, 503, "Google Calendar is not configured")
+                return
+            try:
+                self.google.disconnect(str(session["id"]))
+            except Exception:
+                self._error(handler, 502, "Google Calendar disconnect failed")
+                return
+            self._redirect(handler, "/")
+            return
         self._error(handler, 404, "not found")
 
     def _identity(self, handler: BaseHTTPRequestHandler) -> dict[str, Any] | None:
@@ -231,6 +269,53 @@ class ServerApplication:
         })
         self._redirect(handler, "/", set_cookie=(APP_COOKIE, app_session, 8 * 60 * 60))
 
+    def _start_google_oauth(self, handler: BaseHTTPRequestHandler, session: dict[str, Any]) -> None:
+        if self.google is None:
+            self._error(handler, 503, "Google Calendar is not configured")
+            return
+        state = secrets.token_urlsafe(32)
+        transaction = self.signed_sessions.create(
+            {"state": state, "session_id": str(session["id"])}, lifetime=600
+        )
+        self._redirect(handler, self.google.authorization_url(state), set_cookie=(GOOGLE_OAUTH_COOKIE, transaction, 600))
+
+    def _finish_google_oauth(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> None:
+        clear_google_cookie = GOOGLE_OAUTH_COOKIE
+        if self.google is None:
+            self._error(handler, 503, "Google Calendar is not configured", clear_cookie=clear_google_cookie)
+            return
+        identity = self._identity(handler)
+        if identity is None:
+            self._error(handler, 401, "authentication required", clear_cookie=clear_google_cookie)
+            return
+        google_error = (query.get("error") or [""])[0]
+        if google_error:
+            self._error(
+                handler,
+                400,
+                "Google OAuth failed: " + str(google_error)[:120],
+                clear_cookie=clear_google_cookie,
+            )
+            return
+        transaction = self.signed_sessions.verify(self._cookie(handler, GOOGLE_OAUTH_COOKIE) or "")
+        state = (query.get("state") or [""])[0]
+        code = (query.get("code") or [""])[0]
+        if not transaction or not secrets.compare_digest(state, str(transaction.get("state", ""))) or not code:
+            self._error(handler, 400, "invalid Google OAuth callback", clear_cookie=clear_google_cookie)
+            return
+        user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
+        session = self.database.get_session(str(transaction.get("session_id") or ""))
+        if session is None or int(session["owner_user_id"]) != int(user["id"]):
+            self._error(handler, 404, "session not found", clear_cookie=clear_google_cookie)
+            return
+        try:
+            self.google.exchange_code(str(session["id"]), code)
+        except Exception:
+            self._error(handler, 502, "Google OAuth token exchange failed", clear_cookie=clear_google_cookie)
+            return
+        self.sync_engine.request_sync(str(session["id"]))
+        self._redirect(handler, "/", clear_cookie=clear_google_cookie)
+
     def _dashboard(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         csrf = html.escape(str(identity["csrf"]))
         rows = []
@@ -239,11 +324,13 @@ class ServerApplication:
             label = html.escape(str(session["label"]))
             status = html.escape(str(session["status"]))
             error = html.escape(str(session.get("last_sync_error") or ""))
+            google = self._google_status_markup(str(session["id"]), csrf)
             rows.append(f"""
             <article><h2>{label}</h2><p>Status: <strong>{status}</strong></p>
             <p>{error}</p><p><a href="/sessions/{sid}/login">Open sign-in</a> ·
             <a href="/sessions/{sid}/download/calendar.ics">ICS</a> ·
             <a href="/sessions/{sid}/download/calendar.json">JSON</a></p>
+            {google}
             <form method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
             <label>From <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label>
             <label>To <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label>
@@ -259,6 +346,18 @@ class ServerApplication:
         <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button>Create and sign in</button></form></section>
         {''.join(rows) or '<p>No sessions yet.</p>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
+
+    def _google_status_markup(self, session_id: str, csrf: str) -> str:
+        sid = html.escape(session_id)
+        if self.google is None:
+            return "<p>Google Calendar: <strong>Unavailable</strong></p>"
+        connection = self.database.get_google_connection(session_id)
+        if connection is None:
+            return f"<p>Google Calendar: <strong>Not connected</strong> <a href=\"/sessions/{sid}/google/connect\">Connect</a></p>"
+        last_error = html.escape(str(connection.get("last_error") or ""))
+        error = f"<p>{last_error}</p>" if last_error else ""
+        return f"""<p>Google Calendar: <strong>Connected</strong></p>{error}
+            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="danger">Disconnect Google</button></form>"""
 
     def _login_page(self, handler: BaseHTTPRequestHandler, session: dict[str, Any], identity: dict[str, Any]) -> None:
         sid = str(session["id"])
@@ -375,7 +474,7 @@ class ServerApplication:
         location: str,
         *,
         set_cookie: tuple[str, str, int] | None = None,
-        clear_cookie: bool = False,
+        clear_cookie: str | bool = False,
     ) -> None:
         handler.send_response(303)
         handler.send_header("Location", location)
@@ -383,13 +482,18 @@ class ServerApplication:
             name, value, lifetime = set_cookie
             handler.send_header("Set-Cookie", f"{name}={value}; Path=/; Max-Age={lifetime}; HttpOnly; Secure; SameSite=Lax")
         if clear_cookie:
-            handler.send_header("Set-Cookie", f"{APP_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+            cookie_name = APP_COOKIE if clear_cookie is True else str(clear_cookie)
+            handler.send_header("Set-Cookie", f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
+    def _send_clear_cookie(self, handler: BaseHTTPRequestHandler, clear_cookie: str | None) -> None:
+        if clear_cookie:
+            handler.send_header("Set-Cookie", f"{clear_cookie}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+
     def _layout(self, title: str, body: str) -> str:
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-        :root{{color-scheme:light;background:#f4f0e8;color:#17202a;font:16px/1.5 Georgia,serif}}body{{margin:0}}header,main{{max-width:1100px;margin:auto;padding:24px}}header{{border-bottom:3px solid #9c2f24}}article,section{{background:#fff;padding:20px;margin:18px 0;border:1px solid #d4cbbd;box-shadow:4px 4px 0 #d9cdbb}}form{{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:4px}}input,button{{font:inherit;padding:8px;border:1px solid #776d61}}button{{background:#17365d;color:white;cursor:pointer}}button.danger{{background:#9c2f24}}a{{color:#17365d}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}</style></head><body>{body}</body></html>"""
+        :root{{color-scheme:light;background:#f4f0e8;color:#17202a;font:16px/1.5 Georgia,serif}}body{{margin:0}}header,main{{max-width:1100px;margin:auto;padding:24px}}header{{border-bottom:3px solid #9c2f24}}article,section{{background:#fff;padding:20px;margin:18px 0;border:1px solid #d4cbbd;box-shadow:4px 4px 0 #d9cdbb}}form{{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:4px}}input,button{{font:inherit;padding:8px;border:1px solid #776d61}}button{{background:#17365d;color:white;cursor:pointer}}button.danger{{background:#9c2f24}}a{{color:#17365d}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}</style></head><body>{body}</body></html>"""
 
     def _html(self, handler: BaseHTTPRequestHandler, status: int, text: str, *, no_store: bool = False) -> None:
         body = text.encode("utf-8")
@@ -402,11 +506,12 @@ class ServerApplication:
         handler.end_headers()
         handler.wfile.write(body)
 
-    def _json(self, handler: BaseHTTPRequestHandler, status: int, value: object) -> None:
+    def _json(self, handler: BaseHTTPRequestHandler, status: int, value: object, *, clear_cookie: str | None = None) -> None:
         body = json.dumps(value).encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Cache-Control", "no-store")
+        self._send_clear_cookie(handler, clear_cookie)
         handler.send_header("Content-Length", str(len(body)))
         handler.end_headers()
         handler.wfile.write(body)
@@ -416,8 +521,8 @@ class ServerApplication:
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
-    def _error(self, handler: BaseHTTPRequestHandler, status: int, message: str) -> None:
-        self._json(handler, status, {"error": message})
+    def _error(self, handler: BaseHTTPRequestHandler, status: int, message: str, *, clear_cookie: str | None = None) -> None:
+        self._json(handler, status, {"error": message}, clear_cookie=clear_cookie)
 
 
 def make_server(application: ServerApplication) -> ThreadingHTTPServer:

@@ -27,9 +27,11 @@ Server mode intentionally persists more sensitive state under `server-state/`:
 - JWTs are encrypted in SQLite with the Fernet key supplied through `PHENIKAA_SERVER_KEY`.
 - Per-session Playwright profiles contain live Phenikaa cookies used for silent token refresh.
 - JSON and ICS exports contain private academic data.
+- Optional Google Calendar connections store encrypted access and refresh tokens in SQLite using the same server Fernet key.
+- Google event links are retained after disconnect so reconnecting can update existing app-owned events without duplicating them.
 - A 0600 random secret signs OIDC transactions and application cookies.
 
-Protect and back up the Fernet key separately. Losing it makes stored JWTs unreadable; exposing it allows their decryption. Deleting a session through the dashboard removes its database row, browser profile, and exports. Deleting `server-state/` wipes all local server data.
+Protect and back up the Fernet key separately. Losing it makes stored JWTs and Google tokens unreadable; exposing it allows their decryption. Deleting a session through the dashboard removes its database row, browser profile, exports, Google connection, and retained Google event links. Disconnecting Google revokes the Google token and deletes the local token connection, but keeps event links for safe reconnect/no duplication. Deleting `server-state/` wipes all local server data.
 
 Run the server behind HTTPS, keep its direct listener private, and configure a generic OIDC provider. Never expose `PHENIKAA_SERVER_AUTH=disabled`. `PHENIKAA_BROWSER_NO_SANDBOX=1` weakens Chromium isolation and is only appropriate inside another trusted sandbox such as a locked-down container.
 
@@ -39,4 +41,4 @@ The normal command sends one authenticated POST request to:
 
 `https://qldtbeta.phenikaa-uni.edu.vn/sinhvienapi3/api/SV_ThongTin_MH/DSA4BRINKCIpAiAPKSAv`
 
-No credentials or calendar data are sent to third-party services.
+The command-line exporter does not send credentials or calendar data to third-party services. Server mode contacts the configured OIDC provider for sign-in. When, and only when, a session is connected to Google Calendar, the server sends outbound Google OAuth and Calendar API requests to exchange/refresh/revoke tokens and create, update, or delete that session's linked primary-calendar events.

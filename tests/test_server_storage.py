@@ -48,8 +48,22 @@ class DatabaseTests(unittest.TestCase):
             run_id = database.start_sync_run(session_id)
             database.finish_sync_run(run_id, ok=True, events=2, detail="saved")
             self.assertEqual(database.last_sync_runs(session_id)[0]["events"], 2)
+            database.upsert_google_connection(
+                session_id,
+                access_token_encrypted="access",
+                refresh_token_encrypted="refresh",
+                expires_at="2026-08-30T00:00:00+00:00",
+                scope="calendar",
+            )
+            connection = database.get_google_connection(session_id)
+            assert connection is not None
+            self.assertEqual(connection["access_token_encrypted"], "access")
+            database.upsert_google_event_link(session_id, "source-1", "google-1")
+            self.assertEqual(database.list_google_event_links(session_id)[0]["google_event_id"], "google-1")
             database.delete_session(session_id)
             self.assertEqual(database.last_sync_runs(session_id), [])
+            self.assertIsNone(database.get_google_connection(session_id))
+            self.assertEqual(database.list_google_event_links(session_id), [])
             database.close()
 
 

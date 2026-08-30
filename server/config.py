@@ -52,6 +52,9 @@ class ServerConfig:
     oidc_client_id: str = field(default_factory=lambda: os.environ.get("PHENIKAA_OIDC_CLIENT_ID", ""))
     oidc_client_secret: str = field(default_factory=lambda: os.environ.get("PHENIKAA_OIDC_CLIENT_SECRET", ""))
     oidc_redirect_uri: str = field(default_factory=lambda: os.environ.get("PHENIKAA_OIDC_REDIRECT_URI", ""))
+    google_client_id: str = field(default_factory=lambda: os.environ.get("PHENIKAA_GOOGLE_CLIENT_ID", ""))
+    google_client_secret: str = field(default_factory=lambda: os.environ.get("PHENIKAA_GOOGLE_CLIENT_SECRET", ""))
+    google_redirect_uri: str = field(default_factory=lambda: os.environ.get("PHENIKAA_GOOGLE_REDIRECT_URI", ""))
 
     @property
     def db_path(self) -> Path:
@@ -84,3 +87,7 @@ class ServerConfig:
     def external_url(self, path: str = "") -> str:
         base = self.base_url.rstrip("/") or f"http://{self.host}:{self.port}"
         return base + path
+
+    @property
+    def google_oauth_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret and self.google_redirect_uri)

@@ -6,6 +6,7 @@ from pathlib import Path
 from server.config import ServerConfig
 from server.crypto import TokenVault
 from server.db import Database
+from server.google import GoogleCalendarService, GoogleOAuthConfig
 from server.login_broker import LoginBroker
 from server.oidc import OidcClient, SignedSessions, load_or_create_secret
 from server.refresh import ProfileLocks
@@ -39,7 +40,14 @@ def main(argv: list[str] | None = None) -> int:
     signed_sessions = SignedSessions(load_or_create_secret(config.cookie_secret_path))
     locks = ProfileLocks()
     broker = LoginBroker(config, locks=locks)
-    sync_engine = SyncEngine(config, database, vault, locks=locks)
+    google = None
+    if config.google_oauth_configured:
+        google = GoogleCalendarService(
+            GoogleOAuthConfig(config.google_client_id, config.google_client_secret, config.google_redirect_uri),
+            database,
+            vault,
+        )
+    sync_engine = SyncEngine(config, database, vault, locks=locks, google_syncer=google.sync_session if google else None)
     oidc = None
     if config.auth_mode != "disabled":
         missing = [
@@ -54,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         redirect_uri = config.oidc_redirect_uri or config.external_url("/auth/callback")
         oidc = OidcClient(config.oidc_issuer, config.oidc_client_id, config.oidc_client_secret, redirect_uri)
 
-    application = ServerApplication(config, database, vault, signed_sessions, broker, sync_engine, oidc)
+    application = ServerApplication(config, database, vault, signed_sessions, broker, sync_engine, oidc, google)
     server = make_server(application)
     sync_engine.start()
     print(f"Phenikaa calendar server listening on {config.external_url('/')}")

@@ -22,3 +22,5 @@ phenikaa_calendar.json
 # Test/tool caches
 .pytest_cache/
 .coverage
+.playwright-mcp/
+.omo/

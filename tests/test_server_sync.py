@@ -15,6 +15,11 @@ from server.crypto import TokenVault, token_fingerprint
 from server.db import Database, STATUS_NEEDS_HUMAN
 from server.sync import SyncEngine
 
+
+class FailingGoogleSyncer:
+    def __call__(self, *_args, **_kwargs):
+        raise RuntimeError("calendar unavailable")
+
 SAMPLE_EVENT = {
     "ID": "class-1",
     "TENHOCPHAN": "Distributed Systems",
@@ -98,6 +103,26 @@ class SyncEngineTests(unittest.TestCase):
             updated = database.get_session(session_id)
             assert updated is not None
             self.assertEqual(updated["status"], STATUS_NEEDS_HUMAN)
+            database.close()
+
+    def test_google_failure_does_not_invalidate_export_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, database, vault, session_id = self.make_session(directory)
+            engine = SyncEngine(
+                config,
+                database,
+                vault,
+                fetcher=lambda *_args, **_kwargs: [SAMPLE_EVENT],
+                google_syncer=FailingGoogleSyncer(),
+            )
+            stored = database.get_session(session_id)
+            assert stored is not None
+            result = engine.sync_session(stored)
+            self.assertTrue(result.ok)
+            self.assertIn("saved 1 events", result.detail)
+            self.assertIn("Google Calendar sync failed", result.detail)
+            self.assertTrue((config.exports_dir / session_id / "calendar.json").exists())
+            self.assertTrue(database.last_sync_runs(session_id)[0]["ok"])
             database.close()
 
 

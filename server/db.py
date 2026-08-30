@@ -49,6 +49,24 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     events INTEGER,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS google_connections (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    access_token_encrypted TEXT NOT NULL,
+    refresh_token_encrypted TEXT NOT NULL,
+    token_type TEXT NOT NULL DEFAULT 'Bearer',
+    scope TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    connected_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS google_event_links (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    google_event_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, source_key)
+);
 """
 
 
@@ -229,3 +247,56 @@ class Database:
             (session_id, limit),
         )
         return [dict(row) for row in rows]
+
+    def upsert_google_connection(
+        self,
+        session_id: str,
+        *,
+        access_token_encrypted: str,
+        refresh_token_encrypted: str,
+        expires_at: str,
+        token_type: str = "Bearer",
+        scope: str = "",
+    ) -> None:
+        now = utc_now_iso()
+        self._write(
+            "INSERT INTO google_connections (session_id, access_token_encrypted, refresh_token_encrypted,"
+            " token_type, scope, expires_at, connected_at, updated_at, last_error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)"
+            " ON CONFLICT(session_id) DO UPDATE SET access_token_encrypted = excluded.access_token_encrypted,"
+            " refresh_token_encrypted = excluded.refresh_token_encrypted, token_type = excluded.token_type,"
+            " scope = excluded.scope, expires_at = excluded.expires_at, updated_at = excluded.updated_at, last_error = NULL",
+            (session_id, access_token_encrypted, refresh_token_encrypted, token_type, scope, expires_at, now, now),
+        )
+
+    def get_google_connection(self, session_id: str) -> dict[str, Any] | None:
+        row = self._fetchone("SELECT * FROM google_connections WHERE session_id = ?", (session_id,))
+        return dict(row) if row else None
+
+    def set_google_connection_error(self, session_id: str, error: str | None) -> None:
+        self._write(
+            "UPDATE google_connections SET last_error = ?, updated_at = ? WHERE session_id = ?",
+            (error, utc_now_iso(), session_id),
+        )
+
+    def delete_google_connection(self, session_id: str) -> None:
+        self._write("DELETE FROM google_connections WHERE session_id = ?", (session_id,))
+
+    def list_google_event_links(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self._fetchall(
+            "SELECT * FROM google_event_links WHERE session_id = ? ORDER BY source_key", (session_id,)
+        )
+        return [dict(row) for row in rows]
+
+    def upsert_google_event_link(self, session_id: str, source_key: str, google_event_id: str) -> None:
+        self._write(
+            "INSERT INTO google_event_links (session_id, source_key, google_event_id, updated_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(session_id, source_key) DO UPDATE SET google_event_id = excluded.google_event_id,"
+            " updated_at = excluded.updated_at",
+            (session_id, source_key, google_event_id, utc_now_iso()),
+        )
+
+    def delete_google_event_link(self, session_id: str, source_key: str) -> None:
+        self._write(
+            "DELETE FROM google_event_links WHERE session_id = ? AND source_key = ?", (session_id, source_key)
+        )

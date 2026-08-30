@@ -6,6 +6,8 @@ A reproducible command-line project that reads the authenticated Phenikaa studen
 - `.ics` - timezone-aware calendar import for Apple Calendar, Google Calendar and Outlook.
 - `.json` - normalized source records for auditing and future processing.
 
+Server mode can optionally connect a session to Google Calendar for one-way Phenikaa-to-Google primary-calendar sync; see [Server and Docker deployment](docs/SERVER.md).
+
 The project does not store passwords or enter credentials on your behalf. It reads session data from your own authenticated browser.
 
 ## Requirements
