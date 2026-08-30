@@ -84,6 +84,28 @@ class WebSmokeTests(unittest.TestCase):
     def _app_cookie(self, signed_sessions, subject="subject", name="User", csrf="csrf-token"):
         return signed_sessions.create({"sub": subject, "name": name, "csrf": csrf})
 
+    def test_legal_pages_are_public_in_oidc_mode_and_include_footer_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, database, _signed_sessions, _sync, server, thread = self._start_app(directory, auth_mode="oidc")
+            config.policy_contact = "Ops <privacy@example.edu>"
+            try:
+                for path, title, phrase in (
+                    ("/privacy", b"Privacy Policy", b"Google API Services User Data Policy"),
+                    ("/terms", b"Terms of Service", b"https://www.googleapis.com/auth/calendar.events"),
+                ):
+                    status, headers, body = self._request(server, "GET", path)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+                    self.assertNotIn("Location", headers)
+                    self.assertIn(title, body)
+                    self.assertIn(phrase, body)
+                    self.assertIn(b"Ops &lt;privacy@example.edu&gt;", body)
+                    self.assertIn(b"code{overflow-wrap:anywhere}", body)
+                    self.assertIn(b'href="/privacy"', body)
+                    self.assertIn(b'href="/terms"', body)
+            finally:
+                self._stop_app(database, server, thread)
+
     def test_disabled_auth_dashboard_and_session_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             config = ServerConfig(state_dir=Path(directory), host="127.0.0.1", port=0, auth_mode="disabled")

@@ -11,6 +11,7 @@ python -m pip install -e "[server]"
 playwright install chromium
 export PHENIKAA_SERVER_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
 export PHENIKAA_SERVER_BASE_URL="https://calendar.example.edu"
+export PHENIKAA_POLICY_CONTACT="Calendar operations <calendar-ops@example.edu>"
 export PHENIKAA_OIDC_ISSUER="https://identity.example.edu"
 export PHENIKAA_OIDC_CLIENT_ID="phenikaa-calendar"
 export PHENIKAA_OIDC_CLIENT_SECRET="..."
@@ -20,6 +21,13 @@ phenikaa-calendar-server --host 127.0.0.1 --port 8416
 Register `${PHENIKAA_SERVER_BASE_URL}/auth/callback` with the OIDC provider. The provider must expose standard discovery metadata and RS256 JWKS keys. Use `client_secret_basic` for the token endpoint authentication method.
 
 Keep `PHENIKAA_SERVER_KEY` unchanged for the lifetime of the state directory. State includes `server.db`, browser profiles, exports, and `cookie.secret`.
+
+Set `PHENIKAA_POLICY_CONTACT` to the operator contact shown on the public Privacy Policy and Terms of Service pages. These pages do not require app authentication and are suitable for OAuth consent-screen links:
+
+```text
+${PHENIKAA_SERVER_BASE_URL}/privacy
+${PHENIKAA_SERVER_BASE_URL}/terms
+```
 
 ## Optional Google Calendar sync
 

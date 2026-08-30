@@ -13,6 +13,7 @@ DEFAULT_PORT = 8416
 DEFAULT_SYNC_INTERVAL_HOURS = 24
 DEFAULT_LOGIN_TIMEOUT = 600.0
 DEFAULT_REFRESH_TIMEOUT = 180.0
+DEFAULT_POLICY_CONTACT = "the server operator"
 # Academic-year window (Aug 1 -> Jul 31 next year), configurable per session.
 DEFAULT_RANGE_START_MONTH = 8
 DEFAULT_RANGE_START_DAY = 1
@@ -43,6 +44,7 @@ class ServerConfig:
         default_factory=lambda: float(os.environ.get("PHENIKAA_SERVER_REFRESH_TIMEOUT", str(DEFAULT_REFRESH_TIMEOUT)))
     )
     encryption_key: str = field(default_factory=lambda: os.environ.get("PHENIKAA_SERVER_KEY", ""))
+    policy_contact: str = field(default_factory=lambda: os.environ.get("PHENIKAA_POLICY_CONTACT", DEFAULT_POLICY_CONTACT))
     browser_no_sandbox: bool = field(
         default_factory=lambda: os.environ.get("PHENIKAA_BROWSER_NO_SANDBOX", "").lower() in ("1", "true", "yes")
     )

@@ -15,6 +15,7 @@ from phenikaa_login import LoginTimeout
 from server.config import ServerConfig, academic_year_range
 from server.crypto import TokenVault, token_fingerprint
 from server.db import Database, STATUS_NEEDS_HUMAN, STATUS_PENDING_LOGIN
+from server.legal import privacy_policy_body, terms_body
 from server.login_broker import LoginBroker, validate_event
 from server.oidc import OidcClient, SignedSessions, new_authorization_state
 
@@ -85,6 +86,12 @@ class ServerApplication:
             return
         if path == "/favicon.ico":
             self._empty(handler, 204)
+            return
+        if path == "/privacy":
+            self._html(handler, 200, self._layout("Privacy Policy", privacy_policy_body(self.config.policy_contact)))
+            return
+        if path == "/terms":
+            self._html(handler, 200, self._layout("Terms of Service", terms_body(self.config.policy_contact)))
             return
         if path == "/auth/login":
             self._start_oidc(handler)
@@ -493,7 +500,7 @@ class ServerApplication:
 
     def _layout(self, title: str, body: str) -> str:
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-        :root{{color-scheme:light;background:#f4f0e8;color:#17202a;font:16px/1.5 Georgia,serif}}body{{margin:0}}header,main{{max-width:1100px;margin:auto;padding:24px}}header{{border-bottom:3px solid #9c2f24}}article,section{{background:#fff;padding:20px;margin:18px 0;border:1px solid #d4cbbd;box-shadow:4px 4px 0 #d9cdbb}}form{{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:4px}}input,button{{font:inherit;padding:8px;border:1px solid #776d61}}button{{background:#17365d;color:white;cursor:pointer}}button.danger{{background:#9c2f24}}a{{color:#17365d}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}</style></head><body>{body}</body></html>"""
+        :root{{color-scheme:light;background:#f4f0e8;color:#17202a;font:16px/1.5 Georgia,serif}}body{{margin:0}}header,main,footer{{max-width:1100px;margin:auto;padding:24px}}header{{border-bottom:3px solid #9c2f24}}article,section{{background:#fff;padding:20px;margin:18px 0;border:1px solid #d4cbbd;box-shadow:4px 4px 0 #d9cdbb}}form{{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:4px}}input,button{{font:inherit;padding:8px;border:1px solid #776d61}}button{{background:#17365d;color:white;cursor:pointer}}button.danger{{background:#9c2f24}}a{{color:#17365d}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}code{{overflow-wrap:anywhere}}footer{{font-size:.95rem;border-top:1px solid #d4cbbd}}footer a{{margin-right:12px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}</style></head><body>{body}<footer><a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Service</a></footer></body></html>"""
 
     def _html(self, handler: BaseHTTPRequestHandler, status: int, text: str, *, no_store: bool = False) -> None:
         body = text.encode("utf-8")
