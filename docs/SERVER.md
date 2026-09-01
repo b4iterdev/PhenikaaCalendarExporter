@@ -31,7 +31,11 @@ ${PHENIKAA_SERVER_BASE_URL}/terms
 
 ## Optional Google Calendar sync
 
-Google Calendar integration is server-only and does not change the CLI. It performs one-way sync from Phenikaa to the connected user's Google primary calendar. Sync creates new linked events, updates previously linked events, and deletes stale app-owned linked events that disappeared from the Phenikaa range. Unrelated Google Calendar events are not touched. Calendar selection, two-way sync, and Google webhooks are not implemented.
+Google Calendar integration is server-only and does not change the CLI. It performs one-way sync from Phenikaa to a dedicated Google calendar created by this app named `Phenikaa Learning Calendar`. Sync creates new linked events, updates previously linked events, and deletes stale app-owned linked events that disappeared from the Phenikaa range inside that dedicated calendar. Unrelated Google Calendar events are not touched. Calendar selection, two-way sync, and Google webhooks are not implemented.
+
+If the dedicated Google calendar is deleted outside this service, the next sync detects the missing persisted calendar, creates and persists a replacement, and recreates linked Phenikaa events in the replacement calendar.
+
+Servers upgraded from the earlier primary-calendar sync keep their stored legacy event links until migration finishes. On the first successful sync after upgrade, the server creates and persists the dedicated calendar ID, GET-verifies each stored primary event still carries this app's private source marker before DELETE, removes absent 404/410 primary links locally, and retries remaining stored primary links on later syncs if Google returns a transient error. Fresh Google connections do not call the primary calendar.
 
 To enable it:
 
@@ -47,7 +51,9 @@ export PHENIKAA_GOOGLE_CLIENT_SECRET="..."
 export PHENIKAA_GOOGLE_REDIRECT_URI="${PHENIKAA_SERVER_BASE_URL}/auth/google/callback"
 ```
 
-The requested Google scope is exactly `https://www.googleapis.com/auth/calendar.events`. After the server starts, open the dashboard and use each session's `Connect` link under `Google Calendar`. The OAuth callback stores encrypted access and refresh tokens, then requests an immediate sync. Use `Disconnect Google` to revoke the Google token and remove the local Google connection.
+Fresh Google connections request only `https://www.googleapis.com/auth/calendar.app.created`. Sessions upgraded from the earlier primary-calendar sync request temporary `https://www.googleapis.com/auth/calendar.events` in addition to app-created scope only while primary cleanup is pending, so the server can GET-verify the app private marker and delete its previously linked primary-calendar events once. After verified cleanup and dedicated-calendar reconcile, the broad legacy token is revoked locally and at Google; the user reconnects app-only for ongoing sync. After the server starts, open the dashboard and use each session's `Connect` link under `Google Calendar`. The OAuth callback stores encrypted access and refresh tokens for the exact requested scope, then requests an immediate sync. Use `Disconnect Google` to revoke the Google token and remove the local Google connection.
+
+Legacy Google connections authorized before the dedicated-calendar change may need to reconnect once so Google grants `calendar.app.created` before migration can create the dedicated calendar.
 
 ## Docker
 

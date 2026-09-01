@@ -2,6 +2,7 @@ import http.client
 from http import cookies
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from importlib.util import find_spec
@@ -15,6 +16,7 @@ from cryptography.fernet import Fernet
 from server.config import ServerConfig
 from server.crypto import TokenVault
 from server.db import Database
+from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
 from server.login_broker import LoginBroker
 from server.oidc import SignedSessions
 from server.refresh import ProfileLocks
@@ -25,15 +27,17 @@ from server.web import ServerApplication, make_server
 class FakeGoogleService:
     def __init__(self):
         self.states: list[str] = []
-        self.exchanges: list[tuple[str, str]] = []
+        self.scopes: list[str] = []
+        self.exchanges: list[tuple[str, str, str]] = []
         self.disconnects: list[str] = []
 
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scope: str = SCOPE) -> str:
         self.states.append(state)
-        return "https://accounts.example/auth?" + urllib.parse.urlencode({"state": state})
+        self.scopes.append(scope)
+        return "https://accounts.example/auth?" + urllib.parse.urlencode({"state": state, "scope": scope})
 
-    def exchange_code(self, session_id: str, code: str) -> None:
-        self.exchanges.append((session_id, code))
+    def exchange_code(self, session_id: str, code: str, requested_scope: str = SCOPE) -> None:
+        self.exchanges.append((session_id, code, requested_scope))
 
     def disconnect(self, session_id: str) -> None:
         self.disconnects.append(session_id)
@@ -48,13 +52,13 @@ class RecordingSync:
 
 
 class WebSmokeTests(unittest.TestCase):
-    def _start_app(self, directory, *, auth_mode="disabled", google=None):
+    def _start_app(self, directory, *, auth_mode="disabled", google=None, locks=None):
         config = ServerConfig(state_dir=Path(directory), host="127.0.0.1", port=0, auth_mode=auth_mode)
         config.ensure_dirs()
         database = Database(config.db_path)
         vault = TokenVault(Fernet.generate_key())
         signed_sessions = SignedSessions(b"x" * 32)
-        broker = LoginBroker(config, locks=ProfileLocks())
+        broker = LoginBroker(config, locks=locks or ProfileLocks())
         sync = RecordingSync()
         app = ServerApplication(config, database, vault, signed_sessions, broker, sync, None, google)
         server = make_server(app)
@@ -199,6 +203,26 @@ class WebSmokeTests(unittest.TestCase):
                 assert transaction is not None
                 self.assertEqual(transaction["session_id"], session_id)
                 self.assertEqual(transaction["state"], google.states[0])
+                self.assertEqual(transaction["requested_scope"], SCOPE)
+                self.assertEqual(google.scopes, [SCOPE])
+            finally:
+                self._stop_app(database, server, thread)
+
+
+    def test_google_connect_requests_temporary_events_scope_only_for_pending_primary_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            google = FakeGoogleService()
+            _config, database, signed_sessions, _sync, server, thread = self._start_app(directory, google=google)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                database.set_google_migration_state(session_id, "primary_cleanup_pending")
+                status, headers, _body = self._request(server, "GET", f"/sessions/{session_id}/google/connect")
+                self.assertEqual(status, 303)
+                transaction = signed_sessions.verify(self._cookie_value(headers["Set-Cookie"], "phenikaa_google_oauth_transaction"))
+                assert transaction is not None
+                self.assertEqual(transaction["requested_scope"], LEGACY_CLEANUP_SCOPE)
+                self.assertEqual(google.scopes, [LEGACY_CLEANUP_SCOPE])
             finally:
                 self._stop_app(database, server, thread)
 
@@ -209,7 +233,7 @@ class WebSmokeTests(unittest.TestCase):
             try:
                 user = database.get_or_create_user("local-development-user", "Local user")
                 session_id = database.create_session(user["id"])
-                transaction = signed_sessions.create({"state": "state-ok", "session_id": session_id}, lifetime=600)
+                transaction = signed_sessions.create({"state": "state-ok", "session_id": session_id, "requested_scope": SCOPE}, lifetime=600)
                 status, headers, _body = self._request(
                     server,
                     "GET",
@@ -219,9 +243,53 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertEqual(status, 303)
                 self.assertEqual(headers["Location"], "/")
                 self.assertIn("phenikaa_google_oauth_transaction=;", headers["Set-Cookie"])
-                self.assertEqual(google.exchanges, [(session_id, "code-ok")])
+                self.assertEqual(google.exchanges, [(session_id, "code-ok", SCOPE)])
                 self.assertEqual(sync.requested, [session_id])
             finally:
+                self._stop_app(database, server, thread)
+
+    def test_google_callback_waits_for_profile_lock_before_exchanging_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            locks = ProfileLocks()
+            google = FakeGoogleService()
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, google=google, locks=locks
+            )
+            profile_lock = None
+            lock_held = False
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                transaction = signed_sessions.create({"state": "state-ok", "session_id": session_id, "requested_scope": LEGACY_CLEANUP_SCOPE}, lifetime=600)
+                profile_lock = locks.for_profile(session_id)
+                profile_lock.acquire()
+                lock_held = True
+                result = []
+
+                def request_callback():
+                    result.append(self._request(
+                        server,
+                        "GET",
+                        "/auth/google/callback?state=state-ok&code=code-ok",
+                        headers={"Cookie": f"phenikaa_google_oauth_transaction={transaction}"},
+                    ))
+
+                request_thread = threading.Thread(target=request_callback)
+                request_thread.start()
+                time.sleep(0.1)
+                self.assertEqual(result, [])
+                self.assertEqual(google.exchanges, [])
+                self.assertEqual(sync.requested, [])
+                profile_lock.release()
+                lock_held = False
+                request_thread.join(2)
+                self.assertFalse(request_thread.is_alive())
+                self.assertEqual(result[0][0], 303)
+                self.assertEqual(google.exchanges, [(session_id, "code-ok", LEGACY_CLEANUP_SCOPE)])
+                self.assertEqual(sync.requested, [session_id])
+            finally:
+                if lock_held and profile_lock is not None:
+                    profile_lock.release()
                 self._stop_app(database, server, thread)
 
     def test_google_callback_rejects_bad_state_and_google_error_clears_transaction(self):
@@ -317,6 +385,38 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertEqual(headers["Location"], "/")
                 self.assertEqual(google.disconnects, [session_id])
             finally:
+                self._stop_app(database, server, thread)
+
+    def test_google_disconnect_returns_conflict_while_profile_lock_is_busy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            locks = ProfileLocks()
+            google = FakeGoogleService()
+            _config, database, signed_sessions, _sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", google=google, locks=locks
+            )
+            profile_lock = None
+            lock_held = False
+            try:
+                user = database.get_or_create_user("subject", "User")
+                session_id = database.create_session(user["id"])
+                app_cookie = self._app_cookie(signed_sessions)
+                body = urllib.parse.urlencode({"csrf": "csrf-token"})
+                profile_lock = locks.for_profile(session_id)
+                profile_lock.acquire()
+                lock_held = True
+                status, _headers, payload = self._request(
+                    server,
+                    "POST",
+                    f"/sessions/{session_id}/google/disconnect",
+                    body=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded", "Cookie": f"phenikaa_server_session={app_cookie}"},
+                )
+                self.assertEqual(status, 409)
+                self.assertIn(b"session is busy", payload)
+                self.assertEqual(google.disconnects, [])
+            finally:
+                if lock_held and profile_lock is not None:
+                    profile_lock.release()
                 self._stop_app(database, server, thread)
 
     def test_google_dashboard_states_absent_connected_error_and_no_token_leakage(self):

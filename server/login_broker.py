@@ -170,9 +170,9 @@ class LoginBroker:
     def _lock_for(self, profile_key: str) -> threading.RLock:
         return self._locks.for_profile(profile_key)
 
-    def try_profile_lock(self, session_id: str) -> threading.RLock | None:
+    def try_profile_lock(self, session_id: str, *, blocking: bool = False) -> threading.RLock | None:
         lock = self._lock_for(session_id)
-        return lock if lock.acquire(blocking=False) else None
+        return lock if lock.acquire(blocking=blocking) else None
 
     def profile_dir(self, session_id: str) -> Path:
         return self._config.profiles_dir / session_id

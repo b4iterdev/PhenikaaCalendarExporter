@@ -12,13 +12,19 @@ from typing import Any, Callable, Optional
 from phenikaa_exporter import TIMEZONE, clean_html_breaks, event_datetime, normalize_events
 
 from server.crypto import TokenVault
-from server.db import Database
+from server.db import Database, GOOGLE_APP_CALENDAR_READY, GOOGLE_PRIMARY_CLEANUP_PENDING
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
-EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
-SCOPE = "https://www.googleapis.com/auth/calendar.events"
+CALENDARS_URL = "https://www.googleapis.com/calendar/v3/calendars"
+EVENTS_BASE_URL = "https://www.googleapis.com/calendar/v3/calendars"
+PRIMARY_CALENDAR_ID = "primary"
+APP_CALENDAR_SUMMARY = "Phenikaa Learning Calendar"
+APP_CREATED_SCOPE = "https://www.googleapis.com/auth/calendar.app.created"
+EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+SCOPE = APP_CREATED_SCOPE
+LEGACY_CLEANUP_SCOPE = APP_CREATED_SCOPE + " " + EVENTS_SCOPE
 APP_PRIVATE_KEY = "phenikaaCalendarSourceKey"
 
 
@@ -62,12 +68,12 @@ def default_http_request(method: str, url: str, headers: dict[str, str], body: O
         return GoogleHttpResponse(error.code, error.read())
 
 
-def authorization_url(config: GoogleOAuthConfig, state: str) -> str:
+def authorization_url(config: GoogleOAuthConfig, state: str, scope: str = SCOPE) -> str:
     query = urllib.parse.urlencode({
         "client_id": config.client_id,
         "redirect_uri": config.redirect_uri,
         "response_type": "code",
-        "scope": SCOPE,
+        "scope": scope,
         "state": state,
         "access_type": "offline",
         "prompt": "consent",
@@ -93,10 +99,11 @@ class GoogleCalendarService:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.timeout = timeout
 
-    def authorization_url(self, state: str) -> str:
-        return authorization_url(self.config, state)
+    def authorization_url(self, state: str, scope: str = SCOPE) -> str:
+        return authorization_url(self.config, state, scope)
 
-    def exchange_code(self, session_id: str, code: str) -> None:
+    def exchange_code(self, session_id: str, code: str, requested_scope: str = SCOPE) -> None:
+        existing = self.database.get_google_connection(session_id)
         token = self._token_request({
             "code": code,
             "client_id": self.config.client_id,
@@ -104,7 +111,10 @@ class GoogleCalendarService:
             "redirect_uri": self.config.redirect_uri,
             "grant_type": "authorization_code",
         })
-        self._store_tokens(session_id, token, existing_refresh_token=self._existing_refresh_token(session_id))
+        existing_refresh_token = None if existing is None else self.vault.decrypt(str(existing["refresh_token_encrypted"]))
+        self._store_tokens(
+            session_id, token, existing_refresh_token=existing_refresh_token, scope_fallback=requested_scope
+        )
 
     def disconnect(self, session_id: str) -> None:
         connection = self.database.get_google_connection(session_id)
@@ -128,7 +138,15 @@ class GoogleCalendarService:
             return GoogleSyncResult(attempted=False, ok=True, detail="Google Calendar is not connected")
         try:
             access_token = self._valid_access_token(session_id, connection)
-            result = self._reconcile(session_id, access_token, events)
+            connection = self.database.get_google_connection(session_id) or connection
+            calendar_id = self._ensure_app_calendar(session_id, access_token, connection)
+            connection = self.database.get_google_connection(session_id) or connection
+            if connection.get("migration_state") == GOOGLE_PRIMARY_CLEANUP_PENDING:
+                self._cleanup_primary_links(session_id, access_token)
+            result = self._reconcile(session_id, access_token, calendar_id, events)
+            connection = self.database.get_google_connection(session_id) or connection
+            if self._has_scope(connection, EVENTS_SCOPE):
+                self._revoke_broad_legacy_connection(session_id, connection)
             self.database.set_google_connection_error(session_id, None)
             return result
         except Exception as error:
@@ -149,14 +167,10 @@ class GoogleCalendarService:
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         })
-        self._store_tokens(session_id, token, existing_refresh_token=refresh_token)
+        self._store_tokens(
+            session_id, token, existing_refresh_token=refresh_token, scope_fallback=str(connection.get("scope") or "")
+        )
         return str(token["access_token"])
-
-    def _existing_refresh_token(self, session_id: str) -> Optional[str]:
-        connection = self.database.get_google_connection(session_id)
-        if connection is None:
-            return None
-        return self.vault.decrypt(str(connection["refresh_token_encrypted"]))
 
     def _revocation_token(self, connection: dict[str, Any]) -> str:
         refresh_token_encrypted = str(connection.get("refresh_token_encrypted") or "")
@@ -164,7 +178,14 @@ class GoogleCalendarService:
             return self.vault.decrypt(refresh_token_encrypted)
         return self.vault.decrypt(str(connection["access_token_encrypted"]))
 
-    def _store_tokens(self, session_id: str, token: dict[str, Any], *, existing_refresh_token: Optional[str]) -> None:
+    def _store_tokens(
+        self,
+        session_id: str,
+        token: dict[str, Any],
+        *,
+        existing_refresh_token: Optional[str],
+        scope_fallback: str,
+    ) -> None:
         access_token = str(token.get("access_token") or "")
         refresh_token = str(token.get("refresh_token") or existing_refresh_token or "")
         if not access_token or not refresh_token:
@@ -176,7 +197,7 @@ class GoogleCalendarService:
             access_token_encrypted=self.vault.encrypt(access_token),
             refresh_token_encrypted=self.vault.encrypt(refresh_token),
             token_type=str(token.get("token_type") or "Bearer"),
-            scope=str(token.get("scope") or SCOPE),
+            scope=str(token.get("scope") or scope_fallback),
             expires_at=expires_at,
         )
 
@@ -191,44 +212,142 @@ class GoogleCalendarService:
             raise GoogleCalendarError(str(payload.get("error_description") or payload.get("error") or response.status))
         return payload
 
-    def _reconcile(self, session_id: str, access_token: str, events: list[dict[str, Any]]) -> GoogleSyncResult:
+    def _reconcile(
+        self, session_id: str, access_token: str, calendar_id: str, events: list[dict[str, Any]]
+    ) -> GoogleSyncResult:
         desired = {source_key(event): google_event_body(event) for event in normalize_events(events)}
-        links = {str(row["source_key"]): str(row["google_event_id"]) for row in self.database.list_google_event_links(session_id)}
+        links = {
+            str(row["source_key"]): str(row["google_event_id"])
+            for row in self.database.list_google_event_links(session_id, calendar_id)
+        }
         created = updated = deleted = 0
         for key, body in desired.items():
             body["extendedProperties"] = {"private": {APP_PRIVATE_KEY: key}}
             if key in links:
-                status, payload = self._calendar_request("PUT", f"{EVENTS_URL}/{urllib.parse.quote(links[key], safe='')}", access_token, body)
+                status, payload = self._calendar_request(
+                    "PUT", self._event_url(calendar_id, links[key]), access_token, body
+                )
                 if status == 404:
-                    event_id = self._insert_event(access_token, body)
-                    self.database.upsert_google_event_link(session_id, key, event_id)
+                    event_id = self._insert_event(access_token, calendar_id, body)
+                    self.database.upsert_google_event_link(session_id, key, event_id, calendar_id)
                     created += 1
                 elif 200 <= status < 300:
                     updated += 1
                 else:
                     raise GoogleCalendarError(self._error_message(status, payload))
             else:
-                event_id = self._insert_event(access_token, body)
-                self.database.upsert_google_event_link(session_id, key, event_id)
+                event_id = self._insert_event(access_token, calendar_id, body)
+                self.database.upsert_google_event_link(session_id, key, event_id, calendar_id)
                 created += 1
         for key, event_id in links.items():
             if key not in desired:
-                status, payload = self._calendar_request("DELETE", f"{EVENTS_URL}/{urllib.parse.quote(event_id, safe='')}", access_token, None)
-                if status not in (200, 204, 404, 410):
-                    raise GoogleCalendarError(self._error_message(status, payload))
-                self.database.delete_google_event_link(session_id, key)
+                if self._linked_event_absent_or_verified(access_token, calendar_id, event_id, key):
+                    status, payload = self._calendar_request("DELETE", self._event_url(calendar_id, event_id), access_token, None)
+                    if status not in (200, 204, 404, 410):
+                        raise GoogleCalendarError(self._error_message(status, payload))
+                self.database.delete_google_event_link(session_id, key, calendar_id)
                 deleted += 1
         detail = f"Google Calendar sync created {created}, updated {updated}, deleted {deleted}"
         return GoogleSyncResult(True, True, created, updated, deleted, detail)
 
-    def _insert_event(self, access_token: str, body: dict[str, Any]) -> str:
-        status, payload = self._calendar_request("POST", EVENTS_URL, access_token, body)
+    def _ensure_app_calendar(self, session_id: str, access_token: str, connection: dict[str, Any]) -> str:
+        calendar_id = self._app_calendar_id(connection.get("calendar_id"))
+        if calendar_id:
+            status, payload = self._calendar_request("GET", self._calendar_url(calendar_id), access_token, None)
+            if 200 <= status < 300:
+                return calendar_id
+            if status != 404:
+                raise GoogleCalendarError(self._error_message(status, payload))
+            replacement_id = self._create_app_calendar(session_id, access_token, connection)
+            self.database.delete_google_event_links_for_calendar(session_id, calendar_id)
+            return replacement_id
+        return self._create_app_calendar(session_id, access_token, connection)
+
+    def _create_app_calendar(self, session_id: str, access_token: str, connection: dict[str, Any]) -> str:
+        if not self._has_scope(connection, APP_CREATED_SCOPE):
+            raise GoogleCalendarError("Reconnect Google Calendar to authorize dedicated calendar creation")
+        status, payload = self._calendar_request("POST", CALENDARS_URL, access_token, {"summary": APP_CALENDAR_SUMMARY})
+        if status < 200 or status >= 300:
+            raise GoogleCalendarError(self._error_message(status, payload))
+        calendar_id = str(payload.get("id") or "")
+        if not calendar_id:
+            raise GoogleCalendarError("Google calendar insert response did not include an id")
+        self.database.set_google_calendar_id(session_id, calendar_id)
+        return calendar_id
+
+    def _has_scope(self, connection: dict[str, Any], required_scope: str) -> bool:
+        granted = {scope for scope in str(connection.get("scope") or "").split() if scope}
+        return required_scope in granted
+
+    def _app_calendar_id(self, value: Any) -> str:
+        calendar_id = str(value or "").strip()
+        if not calendar_id or calendar_id == PRIMARY_CALENDAR_ID:
+            return ""
+        return calendar_id
+
+    def _revoke_broad_legacy_connection(self, session_id: str, connection: dict[str, Any]) -> None:
+        token = self._revocation_token(connection)
+        response = self.http_request(
+            "POST",
+            REVOKE_URL,
+            {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            urllib.parse.urlencode({"token": token}).encode("ascii"),
+            self.timeout,
+        )
+        if response.status not in (200, 400):
+            raise GoogleCalendarError(self._error_message(response.status, self._json(response)))
+        self.database.delete_google_connection(session_id)
+
+    def _calendar_url(self, calendar_id: str) -> str:
+        return CALENDARS_URL + "/" + urllib.parse.quote(calendar_id, safe="")
+
+    def _cleanup_primary_links(self, session_id: str, access_token: str) -> None:
+        links = self.database.list_google_event_links(session_id, PRIMARY_CALENDAR_ID)
+        for row in links:
+            source = str(row["source_key"])
+            event_id = str(row["google_event_id"])
+            if not self._linked_event_absent_or_verified(access_token, PRIMARY_CALENDAR_ID, event_id, source):
+                self.database.delete_google_event_link(session_id, source, PRIMARY_CALENDAR_ID)
+                continue
+            status, payload = self._calendar_request(
+                "DELETE", self._event_url(PRIMARY_CALENDAR_ID, event_id), access_token, None
+            )
+            if status not in (200, 204, 404, 410):
+                raise GoogleCalendarError(self._error_message(status, payload))
+            self.database.delete_google_event_link(session_id, source, PRIMARY_CALENDAR_ID)
+        self.database.set_google_migration_state(session_id, GOOGLE_APP_CALENDAR_READY)
+
+
+    def _linked_event_absent_or_verified(
+        self, access_token: str, calendar_id: str, event_id: str, source: str
+    ) -> bool:
+        status, payload = self._calendar_request("GET", self._event_url(calendar_id, event_id), access_token, None)
+        if status in (404, 410):
+            return False
+        if status < 200 or status >= 300:
+            raise GoogleCalendarError(self._error_message(status, payload))
+        extended_properties = payload.get("extendedProperties")
+        if not isinstance(extended_properties, dict):
+            raise GoogleCalendarError("Google event did not include the app private marker")
+        private_properties = extended_properties.get("private")
+        if not isinstance(private_properties, dict) or private_properties.get(APP_PRIVATE_KEY) != source:
+            raise GoogleCalendarError("Google event app private marker did not match the stored source key")
+        return True
+
+    def _insert_event(self, access_token: str, calendar_id: str, body: dict[str, Any]) -> str:
+        status, payload = self._calendar_request("POST", self._events_url(calendar_id), access_token, body)
         if status < 200 or status >= 300:
             raise GoogleCalendarError(self._error_message(status, payload))
         event_id = str(payload.get("id") or "")
         if not event_id:
             raise GoogleCalendarError("Google event insert response did not include an id")
         return event_id
+
+    def _events_url(self, calendar_id: str) -> str:
+        return EVENTS_BASE_URL + "/" + urllib.parse.quote(calendar_id, safe="") + "/events"
+
+    def _event_url(self, calendar_id: str, event_id: str) -> str:
+        return self._events_url(calendar_id) + "/" + urllib.parse.quote(event_id, safe="")
 
     def _calendar_request(
         self, method: str, url: str, access_token: str, body: Optional[dict[str, Any]]

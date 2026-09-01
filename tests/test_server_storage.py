@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import date
@@ -8,7 +9,7 @@ from pathlib import Path
 if find_spec("cryptography") is None:
     raise unittest.SkipTest("server tests require `pip install -e .[server]`")
 
-from server.config import ServerConfig, academic_year_range
+from server.config import academic_year_range
 from server.crypto import TokenVault, load_or_create_key, token_fingerprint
 from server.db import Database, STATUS_ACTIVE
 
@@ -60,11 +61,356 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(connection["access_token_encrypted"], "access")
             database.upsert_google_event_link(session_id, "source-1", "google-1")
             self.assertEqual(database.list_google_event_links(session_id)[0]["google_event_id"], "google-1")
+            self.assertEqual(database.list_google_event_links(session_id)[0]["calendar_id"], "primary")
+            database.set_google_calendar_id(session_id, "app-calendar")
+            calendar_state = database.get_google_calendar_state(session_id)
+            assert calendar_state is not None
+            self.assertEqual(calendar_state["calendar_id"], "app-calendar")
+            database.upsert_google_event_link(session_id, "source-1", "app-google-1", "app-calendar")
+            self.assertEqual(
+                database.list_google_event_links(session_id, "app-calendar")[0]["google_event_id"],
+                "app-google-1",
+            )
             database.delete_session(session_id)
             self.assertEqual(database.last_sync_runs(session_id), [])
             self.assertIsNone(database.get_google_connection(session_id))
+            self.assertIsNone(database.get_google_calendar_state(session_id))
             self.assertEqual(database.list_google_event_links(session_id), [])
             database.close()
+
+    def test_google_calendar_migration_marks_legacy_links_pending_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.db"
+            connection = sqlite3.connect(path)
+            connection.executescript("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                oidc_sub TEXT UNIQUE NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                label TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending_login',
+                phenikaa_user_id TEXT,
+                token_encrypted TEXT,
+                token_fingerprint TEXT,
+                range_start TEXT,
+                range_end TEXT,
+                sync_interval_hours REAL,
+                last_sync_at TEXT,
+                last_sync_status TEXT,
+                last_sync_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                ok INTEGER NOT NULL DEFAULT 0,
+                refreshed_token INTEGER NOT NULL DEFAULT 0,
+                events INTEGER,
+                detail TEXT
+            );
+            CREATE TABLE google_connections (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                access_token_encrypted TEXT NOT NULL,
+                refresh_token_encrypted TEXT NOT NULL,
+                token_type TEXT NOT NULL DEFAULT 'Bearer',
+                scope TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL,
+                connected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT
+            );
+            CREATE TABLE google_event_links (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source_key TEXT NOT NULL,
+                google_event_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, source_key)
+            );
+            INSERT INTO users (id, oidc_sub, display_name, created_at) VALUES (1, 'subject', '', 'now');
+            INSERT INTO sessions (id, owner_user_id, created_at, updated_at) VALUES ('legacy', 1, 'now', 'now');
+            INSERT INTO google_connections (
+                session_id, access_token_encrypted, refresh_token_encrypted, expires_at, connected_at, updated_at
+            ) VALUES ('legacy', 'access', 'refresh', 'later', 'now', 'now');
+            INSERT INTO google_event_links (session_id, source_key, google_event_id, updated_at)
+            VALUES ('legacy', 'source', 'primary-event', 'now');
+            """)
+            connection.commit()
+            connection.close()
+            database = Database(path)
+            legacy = database.get_google_connection("legacy")
+            assert legacy is not None
+            self.assertIsNone(legacy["calendar_id"])
+            self.assertEqual(legacy["migration_state"], "primary_cleanup_pending")
+            state = database.get_google_calendar_state("legacy")
+            assert state is not None
+            self.assertEqual(state["migration_state"], "primary_cleanup_pending")
+            links = database.list_google_event_links("legacy")
+            self.assertEqual(links[0]["calendar_id"], "primary")
+            database.close()
+            again = Database(path)
+            migrated = again.get_google_connection("legacy")
+            assert migrated is not None
+            self.assertEqual(migrated["migration_state"], "primary_cleanup_pending")
+            again.close()
+
+    def test_google_calendar_migration_preserves_disconnected_legacy_links_as_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.db"
+            connection = sqlite3.connect(path)
+            connection.executescript("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                oidc_sub TEXT UNIQUE NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                label TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending_login',
+                phenikaa_user_id TEXT,
+                token_encrypted TEXT,
+                token_fingerprint TEXT,
+                range_start TEXT,
+                range_end TEXT,
+                sync_interval_hours REAL,
+                last_sync_at TEXT,
+                last_sync_status TEXT,
+                last_sync_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                ok INTEGER NOT NULL DEFAULT 0,
+                refreshed_token INTEGER NOT NULL DEFAULT 0,
+                events INTEGER,
+                detail TEXT
+            );
+            CREATE TABLE google_connections (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                access_token_encrypted TEXT NOT NULL,
+                refresh_token_encrypted TEXT NOT NULL,
+                token_type TEXT NOT NULL DEFAULT 'Bearer',
+                scope TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL,
+                connected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT
+            );
+            CREATE TABLE google_event_links (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source_key TEXT NOT NULL,
+                google_event_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, source_key)
+            );
+            INSERT INTO users (id, oidc_sub, display_name, created_at) VALUES (1, 'subject', '', 'now');
+            INSERT INTO sessions (id, owner_user_id, created_at, updated_at) VALUES ('disconnected', 1, 'now', 'now');
+            INSERT INTO google_event_links (session_id, source_key, google_event_id, updated_at)
+            VALUES ('disconnected', 'source', 'primary-event', 'now');
+            """)
+            connection.commit()
+            connection.close()
+            database = Database(path)
+            state = database.get_google_calendar_state("disconnected")
+            assert state is not None
+            self.assertEqual(state["migration_state"], "primary_cleanup_pending")
+            self.assertIsNone(database.get_google_connection("disconnected"))
+            self.assertEqual(database.list_google_event_links("disconnected", "primary")[0]["google_event_id"], "primary-event")
+            database.upsert_google_connection(
+                "disconnected",
+                access_token_encrypted="access",
+                refresh_token_encrypted="refresh",
+                expires_at="2026-08-30T00:00:00+00:00",
+            )
+            reconnected = database.get_google_connection("disconnected")
+            assert reconnected is not None
+            self.assertEqual(reconnected["migration_state"], "primary_cleanup_pending")
+            database.close()
+
+    def test_google_calendar_migration_recovers_legacy_table_after_interrupted_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.db"
+            connection = sqlite3.connect(path)
+            connection.executescript("""
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                oidc_sub TEXT UNIQUE NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                owner_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                label TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending_login',
+                phenikaa_user_id TEXT,
+                token_encrypted TEXT,
+                token_fingerprint TEXT,
+                range_start TEXT,
+                range_end TEXT,
+                sync_interval_hours REAL,
+                last_sync_at TEXT,
+                last_sync_status TEXT,
+                last_sync_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE sync_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                ok INTEGER NOT NULL DEFAULT 0,
+                refreshed_token INTEGER NOT NULL DEFAULT 0,
+                events INTEGER,
+                detail TEXT
+            );
+            CREATE TABLE google_connections (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                access_token_encrypted TEXT NOT NULL,
+                refresh_token_encrypted TEXT NOT NULL,
+                token_type TEXT NOT NULL DEFAULT 'Bearer',
+                scope TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL,
+                calendar_id TEXT,
+                migration_state TEXT NOT NULL DEFAULT 'app_calendar_ready',
+                connected_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT
+            );
+            CREATE TABLE google_calendar_state (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                calendar_id TEXT,
+                migration_state TEXT NOT NULL DEFAULT 'app_calendar_ready',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE google_event_links (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                calendar_id TEXT NOT NULL DEFAULT 'primary',
+                source_key TEXT NOT NULL,
+                google_event_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, calendar_id, source_key)
+            );
+            CREATE TABLE google_event_links_legacy (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source_key TEXT NOT NULL,
+                google_event_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, source_key)
+            );
+            INSERT INTO users (id, oidc_sub, display_name, created_at) VALUES (1, 'subject', '', 'now');
+            INSERT INTO sessions (id, owner_user_id, created_at, updated_at) VALUES ('legacy', 1, 'now', 'now');
+            INSERT INTO google_connections (
+                session_id, access_token_encrypted, refresh_token_encrypted, expires_at,
+                calendar_id, migration_state, connected_at, updated_at
+            ) VALUES ('legacy', 'access', 'refresh', 'later', 'app-calendar', 'app_calendar_ready', 'now', 'now');
+            INSERT INTO google_calendar_state (session_id, calendar_id, migration_state, updated_at)
+            VALUES ('legacy', 'app-calendar', 'app_calendar_ready', 'now');
+            INSERT INTO google_event_links (session_id, calendar_id, source_key, google_event_id, updated_at)
+            VALUES ('legacy', 'app-calendar', 'source-app', 'app-event', 'now');
+            INSERT INTO google_event_links_legacy (session_id, source_key, google_event_id, updated_at)
+            VALUES ('legacy', 'source-primary', 'primary-event', 'later');
+            """)
+            connection.commit()
+            connection.close()
+            database = Database(path)
+            links = database.list_google_event_links("legacy")
+            self.assertEqual(
+                [(row["calendar_id"], row["source_key"], row["google_event_id"]) for row in links],
+                [("app-calendar", "source-app", "app-event"), ("primary", "source-primary", "primary-event")],
+            )
+            stored = database.get_google_connection("legacy")
+            assert stored is not None
+            self.assertEqual(stored["calendar_id"], "app-calendar")
+            self.assertEqual(stored["migration_state"], "primary_cleanup_pending")
+            state = database.get_google_calendar_state("legacy")
+            assert state is not None
+            self.assertEqual(state["migration_state"], "primary_cleanup_pending")
+            database.close()
+
+            rerun = Database(path)
+            self.assertEqual(len(rerun.list_google_event_links("legacy", "primary")), 1)
+            rerun_connection = rerun.get_google_connection("legacy")
+            assert rerun_connection is not None
+            self.assertEqual(rerun_connection["migration_state"], "primary_cleanup_pending")
+            schema_connection = sqlite3.connect(path)
+            legacy_table = schema_connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'google_event_links_legacy'"
+            ).fetchone()
+            schema_connection.close()
+            self.assertIsNone(legacy_table)
+            rerun.close()
+
+    def test_google_calendar_migration_reasserts_pending_when_primary_links_reappear(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.db"
+            database = Database(path)
+            user = database.get_or_create_user("subject")
+            session_id = database.create_session(user["id"])
+            database.upsert_google_connection(
+                session_id,
+                access_token_encrypted="access",
+                refresh_token_encrypted="refresh",
+                expires_at="2026-08-30T00:00:00+00:00",
+            )
+            database.set_google_calendar_id(session_id, "app-calendar")
+            database.upsert_google_event_link(session_id, "source-primary", "primary-event", "primary")
+            database.set_google_migration_state(session_id, "app_calendar_ready")
+            database.close()
+
+            migrated = Database(path)
+            connection = migrated.get_google_connection(session_id)
+            assert connection is not None
+            self.assertEqual(connection["migration_state"], "primary_cleanup_pending")
+            state = migrated.get_google_calendar_state(session_id)
+            assert state is not None
+            self.assertEqual(state["migration_state"], "primary_cleanup_pending")
+            migrated.close()
+
+    def test_google_calendar_migration_sanitizes_primary_dedicated_calendar_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.db"
+            database = Database(path)
+            user = database.get_or_create_user("subject")
+            session_id = database.create_session(user["id"])
+            database.upsert_google_connection(
+                session_id,
+                access_token_encrypted="access",
+                refresh_token_encrypted="refresh",
+                expires_at="2026-08-30T00:00:00+00:00",
+            )
+            database.close()
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE google_connections SET calendar_id = 'primary' WHERE session_id = ?", (session_id,))
+            connection.execute("UPDATE google_calendar_state SET calendar_id = 'primary' WHERE session_id = ?", (session_id,))
+            connection.commit()
+            connection.close()
+
+            migrated = Database(path)
+            stored = migrated.get_google_connection(session_id)
+            assert stored is not None
+            self.assertIsNone(stored["calendar_id"])
+            state = migrated.get_google_calendar_state(session_id)
+            assert state is not None
+            self.assertIsNone(state["calendar_id"])
+            with self.assertRaisesRegex(ValueError, "cannot be primary"):
+                migrated.set_google_calendar_id(session_id, "primary")
+            migrated.close()
 
 
 if __name__ == "__main__":

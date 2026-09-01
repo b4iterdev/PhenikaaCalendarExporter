@@ -14,7 +14,8 @@ from phenikaa_login import LoginTimeout
 
 from server.config import ServerConfig, academic_year_range
 from server.crypto import TokenVault, token_fingerprint
-from server.db import Database, STATUS_NEEDS_HUMAN, STATUS_PENDING_LOGIN
+from server.db import Database, GOOGLE_PRIMARY_CLEANUP_PENDING, STATUS_NEEDS_HUMAN, STATUS_PENDING_LOGIN
+from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
 from server.legal import privacy_policy_body, terms_body
 from server.login_broker import LoginBroker, validate_event
 from server.oidc import OidcClient, SignedSessions, new_authorization_state
@@ -25,10 +26,10 @@ GOOGLE_OAUTH_COOKIE = "phenikaa_google_oauth_transaction"
 
 
 class GoogleCalendarWebService(Protocol):
-    def authorization_url(self, state: str) -> str:
+    def authorization_url(self, state: str, scope: str = SCOPE) -> str:
         raise NotImplementedError
 
-    def exchange_code(self, session_id: str, code: str) -> None:
+    def exchange_code(self, session_id: str, code: str, requested_scope: str = SCOPE) -> None:
         pass
 
     def disconnect(self, session_id: str) -> None:
@@ -224,11 +225,17 @@ class ServerApplication:
             if self.google is None:
                 self._error(handler, 503, "Google Calendar is not configured")
                 return
+            lock = self.broker.try_profile_lock(str(session["id"]))
+            if lock is None:
+                self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                return
             try:
                 self.google.disconnect(str(session["id"]))
             except Exception:
                 self._error(handler, 502, "Google Calendar disconnect failed")
                 return
+            finally:
+                lock.release()
             self._redirect(handler, "/")
             return
         self._error(handler, 404, "not found")
@@ -281,10 +288,22 @@ class ServerApplication:
             self._error(handler, 503, "Google Calendar is not configured")
             return
         state = secrets.token_urlsafe(32)
+        requested_scope = self._google_requested_scope(str(session["id"]))
         transaction = self.signed_sessions.create(
-            {"state": state, "session_id": str(session["id"])}, lifetime=600
+            {"state": state, "session_id": str(session["id"]), "requested_scope": requested_scope}, lifetime=600
         )
-        self._redirect(handler, self.google.authorization_url(state), set_cookie=(GOOGLE_OAUTH_COOKIE, transaction, 600))
+        self._redirect(
+            handler,
+            self.google.authorization_url(state, requested_scope),
+            set_cookie=(GOOGLE_OAUTH_COOKIE, transaction, 600),
+        )
+
+
+    def _google_requested_scope(self, session_id: str) -> str:
+        state = self.database.get_google_calendar_state(session_id)
+        if state is not None and state.get("migration_state") == GOOGLE_PRIMARY_CLEANUP_PENDING:
+            return LEGACY_CLEANUP_SCOPE
+        return SCOPE
 
     def _finish_google_oauth(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> None:
         clear_google_cookie = GOOGLE_OAUTH_COOKIE
@@ -315,11 +334,17 @@ class ServerApplication:
         if session is None or int(session["owner_user_id"]) != int(user["id"]):
             self._error(handler, 404, "session not found", clear_cookie=clear_google_cookie)
             return
+        lock = getattr(self.broker, "try_profile_lock")(str(session["id"]), blocking=True)
+        if lock is None:
+            self._error(handler, 409, "session is busy; retry after login or sync finishes", clear_cookie=clear_google_cookie)
+            return
         try:
-            self.google.exchange_code(str(session["id"]), code)
+            self.google.exchange_code(str(session["id"]), code, str(transaction.get("requested_scope") or SCOPE))
         except Exception:
             self._error(handler, 502, "Google OAuth token exchange failed", clear_cookie=clear_google_cookie)
             return
+        finally:
+            lock.release()
         self.sync_engine.request_sync(str(session["id"]))
         self._redirect(handler, "/", clear_cookie=clear_google_cookie)
 

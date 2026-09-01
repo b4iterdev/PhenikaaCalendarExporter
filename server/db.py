@@ -56,18 +56,38 @@ CREATE TABLE IF NOT EXISTS google_connections (
     token_type TEXT NOT NULL DEFAULT 'Bearer',
     scope TEXT NOT NULL DEFAULT '',
     expires_at TEXT NOT NULL,
+    calendar_id TEXT,
+    migration_state TEXT NOT NULL DEFAULT 'app_calendar_ready',
     connected_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_error TEXT
 );
+CREATE TABLE IF NOT EXISTS google_calendar_state (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    calendar_id TEXT,
+    migration_state TEXT NOT NULL DEFAULT 'app_calendar_ready',
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS google_event_links (
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    calendar_id TEXT NOT NULL DEFAULT 'primary',
     source_key TEXT NOT NULL,
     google_event_id TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (session_id, source_key)
+    PRIMARY KEY (session_id, calendar_id, source_key)
 );
 """
+
+GOOGLE_APP_CALENDAR_READY = "app_calendar_ready"
+GOOGLE_PRIMARY_CLEANUP_PENDING = "primary_cleanup_pending"
+GOOGLE_PRIMARY_CALENDAR_ID = "primary"
+
+
+def _dedicated_google_calendar_id(calendar_id: object) -> str | None:
+    value = str(calendar_id or "").strip()
+    if not value or value == GOOGLE_PRIMARY_CALENDAR_ID:
+        return None
+    return value
 
 
 def utc_now_iso() -> str:
@@ -88,7 +108,84 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        self._migrate_google_calendar_columns()
+
+    def _migrate_google_calendar_columns(self) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                connection_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(google_connections)")}
+                if "calendar_id" not in connection_columns:
+                    self._conn.execute("ALTER TABLE google_connections ADD COLUMN calendar_id TEXT")
+                if "migration_state" not in connection_columns:
+                    self._conn.execute(
+                        "ALTER TABLE google_connections ADD COLUMN migration_state TEXT NOT NULL DEFAULT 'app_calendar_ready'"
+                    )
+
+                tables = self._table_names()
+                link_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(google_event_links)")}
+                if "google_event_links" in tables and "calendar_id" not in link_columns:
+                    self._conn.execute("ALTER TABLE google_event_links RENAME TO google_event_links_legacy")
+                    tables = self._table_names()
+                self._conn.execute(
+                    "CREATE TABLE IF NOT EXISTS google_event_links ("
+                    "session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,"
+                    "calendar_id TEXT NOT NULL DEFAULT 'primary',"
+                    "source_key TEXT NOT NULL,"
+                    "google_event_id TEXT NOT NULL,"
+                    "updated_at TEXT NOT NULL,"
+                    "PRIMARY KEY (session_id, calendar_id, source_key))"
+                )
+                if "google_event_links_legacy" in tables:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO google_event_links "
+                        "(session_id, calendar_id, source_key, google_event_id, updated_at) "
+                        "SELECT session_id, 'primary', source_key, google_event_id, updated_at "
+                        "FROM google_event_links_legacy"
+                    )
+                    self._conn.execute("DROP TABLE google_event_links_legacy")
+
+                self._conn.execute("UPDATE google_connections SET calendar_id = NULL WHERE calendar_id = ?", (GOOGLE_PRIMARY_CALENDAR_ID,))
+                self._conn.execute("UPDATE google_calendar_state SET calendar_id = NULL WHERE calendar_id = ?", (GOOGLE_PRIMARY_CALENDAR_ID,))
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO google_calendar_state (session_id, calendar_id, migration_state, updated_at) "
+                    "SELECT session_id, calendar_id, migration_state, updated_at FROM google_connections"
+                )
+                self._backfill_primary_cleanup_pending()
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _table_names(self) -> set[str]:
+        return {
+            str(row[0])
+            for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+
+    def _backfill_primary_cleanup_pending(self) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO google_calendar_state (session_id, calendar_id, migration_state, updated_at) "
+            "SELECT google_event_links.session_id, NULL, ?, MAX(google_event_links.updated_at) "
+            "FROM google_event_links JOIN sessions ON sessions.id = google_event_links.session_id "
+            "WHERE google_event_links.calendar_id = 'primary' GROUP BY google_event_links.session_id",
+            (GOOGLE_PRIMARY_CLEANUP_PENDING,),
+        )
+        self._conn.execute(
+            "UPDATE google_calendar_state SET migration_state = ?, updated_at = "
+            "COALESCE((SELECT MAX(updated_at) FROM google_event_links "
+            "WHERE google_event_links.session_id = google_calendar_state.session_id "
+            "AND google_event_links.calendar_id = 'primary'), updated_at) "
+            "WHERE session_id IN (SELECT DISTINCT session_id FROM google_event_links WHERE calendar_id = 'primary')",
+            (GOOGLE_PRIMARY_CLEANUP_PENDING,),
+        )
+        self._conn.execute(
+            "UPDATE google_connections SET migration_state = ?, updated_at = "
+            "COALESCE((SELECT updated_at FROM google_calendar_state "
+            "WHERE google_calendar_state.session_id = google_connections.session_id), updated_at) "
+            "WHERE session_id IN (SELECT DISTINCT session_id FROM google_event_links WHERE calendar_id = 'primary')",
+            (GOOGLE_PRIMARY_CLEANUP_PENDING,),
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -259,19 +356,59 @@ class Database:
         scope: str = "",
     ) -> None:
         now = utc_now_iso()
-        self._write(
-            "INSERT INTO google_connections (session_id, access_token_encrypted, refresh_token_encrypted,"
-            " token_type, scope, expires_at, connected_at, updated_at, last_error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)"
-            " ON CONFLICT(session_id) DO UPDATE SET access_token_encrypted = excluded.access_token_encrypted,"
-            " refresh_token_encrypted = excluded.refresh_token_encrypted, token_type = excluded.token_type,"
-            " scope = excluded.scope, expires_at = excluded.expires_at, updated_at = excluded.updated_at, last_error = NULL",
-            (session_id, access_token_encrypted, refresh_token_encrypted, token_type, scope, expires_at, now, now),
-        )
+        with self._lock:
+            state = self._conn.execute(
+                "SELECT calendar_id, migration_state FROM google_calendar_state WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            calendar_id = None if state is None else _dedicated_google_calendar_id(state["calendar_id"])
+            migration_state = str(state["migration_state"] if state else GOOGLE_APP_CALENDAR_READY)
+            self._conn.execute(
+                "INSERT INTO google_calendar_state (session_id, calendar_id, migration_state, updated_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET updated_at = excluded.updated_at",
+                (session_id, calendar_id, migration_state, now),
+            )
+            self._conn.execute(
+                "INSERT INTO google_connections (session_id, access_token_encrypted, refresh_token_encrypted,"
+                " token_type, scope, expires_at, calendar_id, migration_state, connected_at, updated_at, last_error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)"
+                " ON CONFLICT(session_id) DO UPDATE SET access_token_encrypted = excluded.access_token_encrypted,"
+                " refresh_token_encrypted = excluded.refresh_token_encrypted, token_type = excluded.token_type,"
+                " scope = excluded.scope, expires_at = excluded.expires_at, calendar_id = excluded.calendar_id,"
+                " migration_state = excluded.migration_state, updated_at = excluded.updated_at, last_error = NULL",
+                (
+                    session_id,
+                    access_token_encrypted,
+                    refresh_token_encrypted,
+                    token_type,
+                    scope,
+                    expires_at,
+                    calendar_id,
+                    migration_state,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
 
     def get_google_connection(self, session_id: str) -> dict[str, Any] | None:
-        row = self._fetchone("SELECT * FROM google_connections WHERE session_id = ?", (session_id,))
-        return dict(row) if row else None
+        row = self._fetchone(
+            "SELECT google_connections.*, google_calendar_state.calendar_id AS state_calendar_id, "
+            "google_calendar_state.migration_state AS state_migration_state "
+            "FROM google_connections LEFT JOIN google_calendar_state "
+            "ON google_calendar_state.session_id = google_connections.session_id "
+            "WHERE google_connections.session_id = ?",
+            (session_id,),
+        )
+        if row is None:
+            return None
+        connection = dict(row)
+        if connection.pop("state_migration_state") is not None:
+            connection["calendar_id"] = connection.pop("state_calendar_id")
+            connection["migration_state"] = row["state_migration_state"]
+        else:
+            connection.pop("state_calendar_id")
+        return connection
 
     def set_google_connection_error(self, session_id: str, error: str | None) -> None:
         self._write(
@@ -282,21 +419,76 @@ class Database:
     def delete_google_connection(self, session_id: str) -> None:
         self._write("DELETE FROM google_connections WHERE session_id = ?", (session_id,))
 
-    def list_google_event_links(self, session_id: str) -> list[dict[str, Any]]:
+    def get_google_calendar_state(self, session_id: str) -> dict[str, Any] | None:
+        row = self._fetchone("SELECT * FROM google_calendar_state WHERE session_id = ?", (session_id,))
+        return dict(row) if row else None
+
+    def set_google_calendar_id(self, session_id: str, calendar_id: str) -> None:
+        dedicated_calendar_id = _dedicated_google_calendar_id(calendar_id)
+        if dedicated_calendar_id is None:
+            raise ValueError("Google dedicated calendar ID cannot be primary")
+        now = utc_now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO google_calendar_state (session_id, calendar_id, migration_state, updated_at)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET calendar_id = excluded.calendar_id, updated_at = excluded.updated_at",
+                (session_id, dedicated_calendar_id, GOOGLE_APP_CALENDAR_READY, now),
+            )
+            self._conn.execute(
+                "UPDATE google_connections SET calendar_id = ?, updated_at = ? WHERE session_id = ?",
+                (dedicated_calendar_id, now, session_id),
+            )
+            self._conn.commit()
+
+    def set_google_migration_state(self, session_id: str, migration_state: str) -> None:
+        if migration_state not in (GOOGLE_APP_CALENDAR_READY, GOOGLE_PRIMARY_CLEANUP_PENDING):
+            raise ValueError(f"unknown Google migration state: {migration_state}")
+        now = utc_now_iso()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO google_calendar_state (session_id, migration_state, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET migration_state = excluded.migration_state,"
+                " updated_at = excluded.updated_at",
+                (session_id, migration_state, now),
+            )
+            self._conn.execute(
+                "UPDATE google_connections SET migration_state = ?, updated_at = ? WHERE session_id = ?",
+                (migration_state, now, session_id),
+            )
+            self._conn.commit()
+
+    def list_google_event_links(self, session_id: str, calendar_id: str | None = None) -> list[dict[str, Any]]:
+        if calendar_id is None:
+            rows = self._fetchall(
+                "SELECT * FROM google_event_links WHERE session_id = ? ORDER BY calendar_id, source_key", (session_id,)
+            )
+            return [dict(row) for row in rows]
         rows = self._fetchall(
-            "SELECT * FROM google_event_links WHERE session_id = ? ORDER BY source_key", (session_id,)
+            "SELECT * FROM google_event_links WHERE session_id = ? AND calendar_id = ? ORDER BY source_key",
+            (session_id, calendar_id),
         )
         return [dict(row) for row in rows]
 
-    def upsert_google_event_link(self, session_id: str, source_key: str, google_event_id: str) -> None:
+    def upsert_google_event_link(
+        self, session_id: str, source_key: str, google_event_id: str, calendar_id: str = "primary"
+    ) -> None:
         self._write(
-            "INSERT INTO google_event_links (session_id, source_key, google_event_id, updated_at) VALUES (?, ?, ?, ?)"
-            " ON CONFLICT(session_id, source_key) DO UPDATE SET google_event_id = excluded.google_event_id,"
+            "INSERT INTO google_event_links (session_id, calendar_id, source_key, google_event_id, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id, calendar_id, source_key) DO UPDATE SET google_event_id = excluded.google_event_id,"
             " updated_at = excluded.updated_at",
-            (session_id, source_key, google_event_id, utc_now_iso()),
+            (session_id, calendar_id, source_key, google_event_id, utc_now_iso()),
         )
 
-    def delete_google_event_link(self, session_id: str, source_key: str) -> None:
+    def delete_google_event_link(self, session_id: str, source_key: str, calendar_id: str = "primary") -> None:
         self._write(
-            "DELETE FROM google_event_links WHERE session_id = ? AND source_key = ?", (session_id, source_key)
+            "DELETE FROM google_event_links WHERE session_id = ? AND calendar_id = ? AND source_key = ?",
+            (session_id, calendar_id, source_key),
+        )
+
+    def delete_google_event_links_for_calendar(self, session_id: str, calendar_id: str) -> None:
+        self._write(
+            "DELETE FROM google_event_links WHERE session_id = ? AND calendar_id = ?",
+            (session_id, calendar_id),
         )
