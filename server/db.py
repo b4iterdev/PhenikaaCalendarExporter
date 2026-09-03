@@ -14,6 +14,7 @@ STATUS_ACTIVE = "active"
 STATUS_NEEDS_HUMAN = "needs_human"
 STATUS_DISABLED = "disabled"
 ALL_STATUSES = (STATUS_PENDING_LOGIN, STATUS_ACTIVE, STATUS_NEEDS_HUMAN, STATUS_DISABLED)
+SESSION_OWNER_UNIQUE_INDEX = "idx_sessions_owner_user_id_unique"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -98,6 +99,16 @@ def new_session_id() -> str:
     return uuid.uuid4().hex
 
 
+class OwnerSessionExistsError(Exception):
+    def __init__(self, owner_user_id: int) -> None:
+        super().__init__(f"user {owner_user_id} already has a Phenikaa session")
+        self.owner_user_id: int = owner_user_id
+
+
+def _is_owner_session_unique_error(error: sqlite3.IntegrityError) -> bool:
+    return "UNIQUE constraint failed: sessions.owner_user_id" in str(error)
+
+
 class Database:
     """Thread-safe SQLite store shared by the web and scheduler threads."""
 
@@ -108,7 +119,28 @@ class Database:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.executescript(SCHEMA)
+        self._migrate_unique_session_owner()
         self._migrate_google_calendar_columns()
+
+    def _migrate_unique_session_owner(self) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "DELETE FROM sessions WHERE id IN ("
+                    "SELECT newer.id FROM sessions AS newer WHERE EXISTS ("
+                    "SELECT 1 FROM sessions AS older "
+                    "WHERE older.owner_user_id = newer.owner_user_id "
+                    "AND (older.created_at < newer.created_at "
+                    "OR (older.created_at = newer.created_at AND older.id < newer.id))))"
+                )
+                self._conn.execute(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS {SESSION_OWNER_UNIQUE_INDEX} ON sessions(owner_user_id)"
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def _migrate_google_calendar_columns(self) -> None:
         with self._lock:
@@ -193,9 +225,13 @@ class Database:
 
     def _write(self, sql: str, params: tuple[object, ...] = ()) -> int | None:
         with self._lock:
-            cursor = self._conn.execute(sql, params)
-            self._conn.commit()
-            return cursor.lastrowid
+            try:
+                cursor = self._conn.execute(sql, params)
+                self._conn.commit()
+                return cursor.lastrowid
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
         with self._lock:
@@ -243,13 +279,18 @@ class Database:
     ) -> str:
         session_id = new_session_id()
         now = utc_now_iso()
-        self._write(
-            "INSERT INTO sessions (id, owner_user_id, label, range_start, range_end,"
-            " sync_interval_hours, status, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (session_id, owner_user_id, label, range_start, range_end, sync_interval_hours,
-             STATUS_PENDING_LOGIN, now, now),
-        )
+        try:
+            self._write(
+                "INSERT INTO sessions (id, owner_user_id, label, range_start, range_end,"
+                " sync_interval_hours, status, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, owner_user_id, label, range_start, range_end, sync_interval_hours,
+                 STATUS_PENDING_LOGIN, now, now),
+            )
+        except sqlite3.IntegrityError as error:
+            if _is_owner_session_unique_error(error):
+                raise OwnerSessionExistsError(owner_user_id) from error
+            raise
         return session_id
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:

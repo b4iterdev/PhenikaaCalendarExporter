@@ -13,7 +13,7 @@ def privacy_policy_body(operator_contact: str) -> str:
     <h2>Information the server uses</h2>
     <ul>
     <li>OIDC sign-in information from the configured identity provider, including the subject identifier and display name used to create the local account and browser session.</li>
-    <li>Phenikaa session information captured after you sign in through the streamed browser: your Phenikaa <code>userId</code>, an encrypted <code>tokenJWT</code>, and retained browser cookies in the per-session browser profile so the server can refresh the session without storing your password.</li>
+    <li>Phenikaa session information captured after you sign in through the streamed browser: your Phenikaa <code>userId</code>, an encrypted <code>tokenJWT</code>, and retained browser cookies in the per-user session browser profile so the server can refresh the session without storing your password.</li>
     <li>Academic calendar records returned by Phenikaa for the selected date range, including course, exam, time, room, lecturer, section, and attendance details present in the source data.</li>
     <li>Generated JSON and ICS calendar exports for each session.</li>
     <li>If you connect Google Calendar, encrypted Google access and refresh tokens, token metadata, sync status, and links between Phenikaa source events and Google event IDs.</li>
@@ -24,7 +24,7 @@ def privacy_policy_body(operator_contact: str) -> str:
     <h2>Sharing and outbound services</h2>
     <p>The server does not sell personal data, use advertising, or add analytics. It makes outbound calls only as needed to the configured OIDC provider, Phenikaa services, and Google OAuth/Calendar APIs. Calendar data is not intentionally shared with other services.</p>
     <h2>Retention and deletion</h2>
-    <p>Server state is retained while your account and sessions remain configured, including the SQLite database, generated exports, and browser profiles. Deleting a Phenikaa session from the dashboard removes that session's database row, generated exports, Google connection rows and event links through database cascading, and its retained browser profile. Disconnecting Google revokes the Google token when Google accepts the revocation request and removes the local Google connection. Logging out clears only the application session cookie in your browser.</p>
+    <p>Server state is retained while your account and session remain configured, including the SQLite database, generated exports, and browser profile. Deleting a Phenikaa session from the dashboard removes that session's database row, generated exports, Google connection rows and event links through database cascading, and its retained browser profile. Disconnecting Google revokes the Google token when Google accepts the revocation request and removes the local Google connection. Logging out clears only the application session cookie in your browser.</p>
     <h2>Google API Limited Use</h2>
     <p>This app's use and transfer of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements. Google Calendar data and tokens are used only to provide or improve the user-facing calendar sync described above, are not used for advertising, and are not sold.</p>
     <h2>Contact</h2>
@@ -41,7 +41,7 @@ def terms_body(operator_contact: str) -> str:
     <section>
     <p>By using this server, you agree to use it only for your own Phenikaa academic calendar data or data you are authorized to access. This is an unofficial service and is not affiliated with or endorsed by Phenikaa University or Google.</p>
     <h2>What the service does</h2>
-    <p>The service authenticates users through the configured OIDC provider, lets each user create Phenikaa calendar sessions, captures the Phenikaa <code>userId</code> and <code>tokenJWT</code> after the user signs in, stores the token encrypted, keeps browser cookies in a per-session browser profile, fetches academic calendar data for the chosen date range, and writes JSON and ICS exports.</p>
+    <p>The service authenticates users through the configured OIDC provider, lets each user create one Phenikaa calendar session, captures the Phenikaa <code>userId</code> and <code>tokenJWT</code> after the user signs in, stores the token encrypted, keeps browser cookies in a per-user session browser profile, fetches academic calendar data for the chosen date range, and writes JSON and ICS exports.</p>
     <p>Google Calendar integration is optional. Fresh connections request only <code>https://www.googleapis.com/auth/calendar.app.created</code> and perform one-way sync from Phenikaa to a dedicated Google calendar created by this app. Upgraded legacy sessions request temporary <code>https://www.googleapis.com/auth/calendar.events</code> only while verified primary cleanup is pending, then revoke that broad token and reconnect app-only. It creates, updates, and deletes only Google events linked by this app; upgraded legacy cleanup verifies the matching app private marker before deleting stored primary event IDs. It does not provide two-way sync and does not manage unrelated Google events.</p>
     <h2>Your responsibilities</h2>
     <ul>

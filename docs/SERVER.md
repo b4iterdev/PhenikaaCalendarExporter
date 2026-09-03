@@ -2,7 +2,7 @@
 
 [Back to the README](../README.md)
 
-Server mode keeps separate browser profiles for OIDC-authenticated users, encrypts captured JWTs in SQLite, refreshes tokens through retained portal cookies, and writes each session’s JSON and ICS exports.
+Server mode keeps one Phenikaa account session per OIDC-authenticated user, encrypts captured JWTs in SQLite, refreshes tokens through the retained portal cookies, and writes that session's JSON and ICS exports.
 
 ## Configuration
 
@@ -21,6 +21,8 @@ phenikaa-calendar-server --host 127.0.0.1 --port 8416
 Register `${PHENIKAA_SERVER_BASE_URL}/auth/callback` with the OIDC provider. The provider must expose standard discovery metadata and RS256 JWKS keys. Use `client_secret_basic` for the token endpoint authentication method.
 
 Keep `PHENIKAA_SERVER_KEY` unchanged for the lifetime of the state directory. State includes `server.db`, browser profiles, exports, and `cookie.secret`.
+
+On upgrade, SQLite keeps each application user's oldest Phenikaa session row and deletes later duplicate rows before enforcing the one-session limit. Database child rows such as sync history, Google connections, Google calendar state, and Google event links are removed through foreign-key cascading with the deleted duplicate session rows. Existing duplicate browser profiles or export directories are not migrated because the database cannot safely identify filesystem ownership beyond the deleted session IDs.
 
 Set `PHENIKAA_POLICY_CONTACT` to the operator contact shown on the public Privacy Policy and Terms of Service pages. These pages do not require app authentication and are suitable for OAuth consent-screen links:
 
@@ -51,7 +53,7 @@ export PHENIKAA_GOOGLE_CLIENT_SECRET="..."
 export PHENIKAA_GOOGLE_REDIRECT_URI="${PHENIKAA_SERVER_BASE_URL}/auth/google/callback"
 ```
 
-Fresh Google connections request only `https://www.googleapis.com/auth/calendar.app.created`. Sessions upgraded from the earlier primary-calendar sync request temporary `https://www.googleapis.com/auth/calendar.events` in addition to app-created scope only while primary cleanup is pending, so the server can GET-verify the app private marker and delete its previously linked primary-calendar events once. After verified cleanup and dedicated-calendar reconcile, the broad legacy token is revoked locally and at Google; the user reconnects app-only for ongoing sync. After the server starts, open the dashboard and use each session's `Connect` link under `Google Calendar`. The OAuth callback stores encrypted access and refresh tokens for the exact requested scope, then requests an immediate sync. Use `Disconnect Google` to revoke the Google token and remove the local Google connection.
+Fresh Google connections request only `https://www.googleapis.com/auth/calendar.app.created`. Sessions upgraded from the earlier primary-calendar sync request temporary `https://www.googleapis.com/auth/calendar.events` in addition to app-created scope only while primary cleanup is pending, so the server can GET-verify the app private marker and delete its previously linked primary-calendar events once. After verified cleanup and dedicated-calendar reconcile, the broad legacy token is revoked locally and at Google; the user reconnects app-only for ongoing sync. After the server starts, open the dashboard and use the session's `Connect` link under `Google Calendar`. The OAuth callback stores encrypted access and refresh tokens for the exact requested scope, then requests an immediate sync. Use `Disconnect Google` to revoke the Google token and remove the local Google connection.
 
 Legacy Google connections authorized before the dedicated-calendar change may need to reconnect once so Google grants `calendar.app.created` before migration can create the dedicated calendar.
 

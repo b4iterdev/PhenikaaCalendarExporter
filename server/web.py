@@ -14,7 +14,13 @@ from phenikaa_login import LoginTimeout
 
 from server.config import ServerConfig, academic_year_range
 from server.crypto import TokenVault, token_fingerprint
-from server.db import Database, GOOGLE_PRIMARY_CLEANUP_PENDING, STATUS_NEEDS_HUMAN, STATUS_PENDING_LOGIN
+from server.db import (
+    Database,
+    GOOGLE_PRIMARY_CLEANUP_PENDING,
+    OwnerSessionExistsError,
+    STATUS_NEEDS_HUMAN,
+    STATUS_PENDING_LOGIN,
+)
 from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
 from server.legal import privacy_policy_body, terms_body
 from server.login_broker import LoginBroker, validate_event
@@ -157,13 +163,17 @@ class ServerApplication:
             except ValueError as error:
                 self._error(handler, 400, str(error))
                 return
-            session_id = self.database.create_session(
-                int(user["id"]),
-                label=str(form.get("label") or "Phenikaa account")[:80],
-                range_start=start,
-                range_end=end,
-                sync_interval_hours=self.config.sync_interval_hours,
-            )
+            try:
+                session_id = self.database.create_session(
+                    int(user["id"]),
+                    label=str(form.get("label") or "Phenikaa account")[:80],
+                    range_start=start,
+                    range_end=end,
+                    sync_interval_hours=self.config.sync_interval_hours,
+                )
+            except OwnerSessionExistsError:
+                self._error(handler, 409, "user already has a Phenikaa session")
+                return
             self._redirect(handler, f"/sessions/{session_id}/login")
             return
         parts = [part for part in path.split("/") if part]
@@ -370,12 +380,15 @@ class ServerApplication:
             <form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button>Sync now</button></form>
             <form method="post" action="/sessions/{sid}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="danger">Delete</button></form></article>""")
         start, end = academic_year_range()
-        body = f"""
-        <header><h1>Phenikaa Calendar Server</h1><p>{html.escape(str(user['display_name']))}</p></header>
-        <main><section><h2>New session</h2><form method="post" action="/sessions">
+        new_session_form = "" if rows else f"""
+        <section><h2>New session</h2><form method="post" action="/sessions">
         <input type="hidden" name="csrf" value="{csrf}"><label>Name <input name="label" value="Phenikaa account"></label>
         <label>From <input type="date" name="range_start" value="{start.isoformat()}"></label>
         <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button>Create and sign in</button></form></section>
+        """
+        body = f"""
+        <header><h1>Phenikaa Calendar Server</h1><p>{html.escape(str(user['display_name']))}</p></header>
+        <main>{new_session_form}
         {''.join(rows) or '<p>No sessions yet.</p>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
 

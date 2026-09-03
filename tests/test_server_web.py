@@ -129,7 +129,8 @@ class WebSmokeTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.getheader("Cache-Control"), "no-store")
-                response.read()
+                payload = response.read()
+                self.assertIn(b"New session", payload)
                 invalid = urllib.parse.urlencode({
                     "csrf": "development", "label": "Invalid", "range_start": "2027-01-01", "range_end": "2026-01-01"
                 })
@@ -152,6 +153,20 @@ class WebSmokeTests(unittest.TestCase):
                 sessions = database.list_sessions()
                 self.assertEqual(len(sessions), 1)
                 session_id = sessions[0]["id"]
+                connection.request("GET", "/")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                payload = response.read()
+                self.assertNotIn(b"New session", payload)
+                self.assertNotIn(b"Create and sign in", payload)
+                connection.request(
+                    "POST", "/sessions", body=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 409)
+                self.assertIn(b"already has a Phenikaa session", response.read())
+                self.assertEqual([row["id"] for row in database.list_sessions()], [session_id])
                 connection.request(
                     "POST", f"/sessions/{session_id}/event", body=b"{broken",
                     headers={"Content-Type": "application/json", "X-CSRF-Token": "development"},
@@ -437,7 +452,6 @@ class WebSmokeTests(unittest.TestCase):
             try:
                 user = database.get_or_create_user("local-development-user", "Local user")
                 connected = database.create_session(user["id"], label="Connected")
-                unconnected = database.create_session(user["id"], label="Unconnected")
                 database.upsert_google_connection(
                     connected,
                     access_token_encrypted="access-token-secret",
@@ -448,10 +462,21 @@ class WebSmokeTests(unittest.TestCase):
                 status, _headers, body = self._request(server, "GET", "/")
                 self.assertEqual(status, 200)
                 self.assertIn(b"Google Calendar: <strong>Connected</strong>", body)
-                self.assertIn(f"/sessions/{unconnected}/google/connect".encode("utf-8"), body)
                 self.assertIn(b"bad &lt;token&gt;", body)
                 self.assertNotIn(b"access-token-secret", body)
                 self.assertNotIn(b"refresh-token-secret", body)
+            finally:
+                self._stop_app(database, server, thread)
+
+        with tempfile.TemporaryDirectory() as directory:
+            google = FakeGoogleService()
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory, google=google)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                unconnected = database.create_session(user["id"], label="Unconnected")
+                status, _headers, body = self._request(server, "GET", "/")
+                self.assertEqual(status, 200)
+                self.assertIn(f"/sessions/{unconnected}/google/connect".encode("utf-8"), body)
             finally:
                 self._stop_app(database, server, thread)
 
