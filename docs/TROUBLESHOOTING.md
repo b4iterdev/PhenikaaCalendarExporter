@@ -1,5 +1,17 @@
 # Troubleshooting
 
+[Back to the README](../README.md) · [Authentication guide](AUTHENTICATION.md) · [Usage guide](USAGE.md)
+
+## Browser login problems
+
+| Symptom | Fix |
+|---|---|
+| `playwright is required for --browser-login` | Run `python -m pip install -e "[login]"` then `playwright install chromium`. |
+| Browser fails to launch on Linux | Run `playwright install-deps chromium`, then retry. |
+| Sign-in times out after five minutes | Rerun the command and complete sign-in sooner. |
+| Sign-in is requested every run | Delete `.browser-profile/` and sign in again. |
+| Window opens behind other windows | Bring the Chromium window titled like the Phenikaa portal to the front. |
+
 ## `401` or “session expired”
 
 The bearer token is short-lived or can be invalidated by another login.

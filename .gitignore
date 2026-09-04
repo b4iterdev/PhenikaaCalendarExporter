@@ -14,6 +14,7 @@ auth.json
 
 # Calendar data can contain private academic information
 exports/
+server-state/
 *.ics
 *.xlsx
 phenikaa_calendar.json
@@ -21,3 +22,5 @@ phenikaa_calendar.json
 # Test/tool caches
 .pytest_cache/
 .coverage
+.playwright-mcp/
+.omo/
