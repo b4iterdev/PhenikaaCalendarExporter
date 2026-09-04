@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import html
+import io
 import json
 import secrets
 import shutil
+import tempfile
 import urllib.parse
+import zipfile
 from datetime import date, datetime
+from email.parser import BytesParser
+from email.policy import default
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
 
+from phenikaa_exporter import export_calendar_files, parse_bootstrap_html
 from phenikaa_login import LoginTimeout
 
 from server.config import ServerConfig, academic_year_range
@@ -37,6 +43,7 @@ STATUS_LABELS = {
     "needs_human": "Attention needed",
     "disabled": "Disabled",
 }
+MAX_EXPORT_FORM_BYTES = 1024 * 1024
 
 
 class GoogleCalendarWebService(Protocol):
@@ -55,6 +62,19 @@ class SyncRequester(Protocol):
         pass
 
 
+class CalendarExporter(Protocol):
+    def __call__(
+        self,
+        session: dict[str, Any],
+        start: date,
+        end: date,
+        output_dir: Path | str,
+        prefix: str,
+        calendar_name: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
 class ServerApplication:
     def __init__(
         self,
@@ -66,6 +86,7 @@ class ServerApplication:
         sync_engine: SyncRequester,
         oidc: OidcClient | None,
         google: GoogleCalendarWebService | None = None,
+        calendar_exporter: CalendarExporter = export_calendar_files,
     ) -> None:
         self.config = config
         self.database = database
@@ -75,6 +96,7 @@ class ServerApplication:
         self.sync_engine = sync_engine
         self.oidc = oidc
         self.google = google
+        self.calendar_exporter = calendar_exporter
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         application = self
@@ -122,6 +144,9 @@ class ServerApplication:
             return
         identity = self._identity(handler)
         if identity is None:
+            if path == "/":
+                self._landing(handler)
+                return
             self._redirect(handler, "/auth/login")
             return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
@@ -164,16 +189,26 @@ class ServerApplication:
         self._error(handler, 404, "not found")
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
+        path = urllib.parse.urlsplit(handler.path).path
         identity = self._identity(handler)
         if identity is None:
             self._error(handler, 401, "authentication required")
             return
-        form = self._read_form(handler)
+        try:
+            form = self._read_export_form(handler) if path == "/export" else self._read_form(handler)
+        except OverflowError:
+            self._error(handler, 413, "export form is too large")
+            return
+        except (UnicodeError, ValueError):
+            self._error(handler, 400, "invalid form submission")
+            return
         if not self._csrf_valid(handler, identity, form):
             self._error(handler, 403, "invalid CSRF token")
             return
+        if path == "/export":
+            self._export(handler, form)
+            return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
-        path = urllib.parse.urlsplit(handler.path).path
         if path == "/auth/logout":
             self._redirect(handler, "/", clear_cookie=True)
             return
@@ -406,47 +441,132 @@ class ServerApplication:
     def _dashboard(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         csrf = html.escape(str(identity["csrf"]))
         language = self._language(handler)
+        vi = language == "vi"
+        text = {
+            "sessions": "Các phiên lịch của bạn" if vi else "Your calendar sessions",
+            "description": "Kết nối, cấu hình và xuất lịch học của bạn từ một nơi." if vi else "Connect, configure, and export your academic calendar from one place.",
+            "export_eyebrow": "Xuất một lần" if vi else "One-shot export",
+            "export_title": "Tải xuống không đồng bộ" if vi else "Download without syncing",
+            "export_description": "Thông tin đăng nhập chỉ được giữ trong bộ nhớ cho yêu cầu này và không được thêm vào phiên trên máy chủ." if vi else "Credentials stay in memory for this request and are not added to a server session.",
+            "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
+            "saved": "Trang đã xác thực" if vi else "Saved authenticated page",
+            "html": "HTML index.aspx đã xác thực" if vi else "Authenticated index.aspx HTML",
+            "file_hint": "Chọn mã nguồn trang đã lưu có chứa AXYZCLRVN. Tệp có token riêng tư; hãy xóa tệp sau khi hoàn tất." if vi else "Choose the saved page source containing AXYZCLRVN. The file contains a private token; delete it when finished.",
+            "manual": "Phiên thủ công" if vi else "Manual session", "user_id": "ID người dùng" if vi else "User ID",
+            "manual_hint": "Cung cấp cả hai trường và để trống trường trang đã lưu." if vi else "Provide both fields and leave the saved-page field empty.",
+            "export": "Xuất tệp lịch" if vi else "Export calendar files", "or": "hoặc" if vi else "or",
+        }
         rows = []
         summary = []
         for session in self.database.list_sessions(int(user["id"])):
             sid = html.escape(str(session["id"]))
             label = html.escape(str(session["label"]))
             status = html.escape(str(session["status"]))
-            status_label = html.escape(STATUS_LABELS.get(str(session["status"]), "Unknown"))
+            status_label = html.escape(self._status_label(str(session["status"]), language))
             error = html.escape(str(session.get("last_sync_error") or ""))
-            google = self._google_status_markup(str(session["id"]), csrf)
+            google = self._google_status_markup(str(session["id"]), csrf, language)
             is_active = str(session["status"]) == "active"
             export_dir = self.config.exports_dir / str(session["id"])
             has_exports = is_active and (export_dir / "calendar.ics").is_file() and (export_dir / "calendar.json").is_file()
             downloads = "" if not has_exports else f"""
-            <div class="session-section"><h3>Exports</h3><div class="action-row"><a class="button button--quiet" href="/sessions/{sid}/download/calendar.ics">Download ICS</a><a class="button button--quiet" href="/sessions/{sid}/download/calendar.json">Download JSON</a></div></div>"""
-            sync_action = "" if not is_active else f"""<form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--primary">Sync calendar</button></form>"""
-            last_sync = html.escape(self._friendly_timestamp(session.get("last_sync_at")))
+            <div class="session-section"><h3>{'Tệp đã xuất' if vi else 'Exports'}</h3><div class="action-row"><a class="button button--quiet" href="/sessions/{sid}/download/calendar.ics">Download ICS</a><a class="button button--quiet" href="/sessions/{sid}/download/calendar.json">Download JSON</a></div></div>"""
+            sync_action = "" if not is_active else f"""<form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--primary">{'Đồng bộ lịch' if vi else 'Sync calendar'}</button></form>"""
+            last_sync = html.escape(self._friendly_timestamp(session.get("last_sync_at"), language))
             summary.append(f"<div class=\"summary-item\"><span>{label}</span><strong>{status_label}</strong><small>{last_sync}</small></div>")
             rows.append(f"""
             <article class="session-card"><div class="session-card__head"><div><p class="eyebrow">Phenikaa account</p><h2>{label}</h2></div><span class="status status--{status}">{status_label}</span></div>
-            <p class="session-card__error">{error}</p><div class="session-section session-section--connection"><h3>Connection</h3><div class="action-row"><a class="button button--primary" href="/sessions/{sid}/login">{'Reconnect account' if is_active else 'Sign in to connect'}</a>{sync_action}</div></div>
-            <div class="session-section"><h3>Calendar range</h3><form class="range-form" method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
-            <div class="field-group"><label>Range start <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label><label>Range end <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label></div>
-            <button class="button button--primary">Save date range</button></form></div>
+            <p class="session-card__error">{error}</p><div class="session-section session-section--connection"><h3>{'Kết nối' if vi else 'Connection'}</h3><div class="action-row"><a class="button button--primary" href="/sessions/{sid}/login">{'Kết nối lại tài khoản' if is_active and vi else 'Reconnect account' if is_active else 'Đăng nhập để kết nối' if vi else 'Sign in to connect'}</a>{sync_action}</div></div>
+            <div class="session-section"><h3>{'Khoảng thời gian lịch' if vi else 'Calendar range'}</h3><form class="range-form" method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
+            <div class="field-group"><label>{text['from']} <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label><label>{text['to']} <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label></div>
+            <button class="button button--primary">{'Lưu khoảng thời gian' if vi else 'Save date range'}</button></form></div>
             {downloads}<div class="session-section"><h3>Google Calendar</h3><div class="integration">{google}</div></div></article>""")
         start, end = academic_year_range()
         new_session_form = "" if rows else f"""
-        <section class="setup-card"><p class="eyebrow">FIRST CONNECTION</p><h2>New session: connect a Phenikaa account</h2><p>Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.</p><form method="post" action="/sessions">
+         <section class="setup-card"><p class="eyebrow">{'KẾT NỐI ĐẦU TIÊN' if vi else 'FIRST CONNECTION'}</p><h2>{'Phiên mới: kết nối tài khoản Phenikaa' if vi else 'New session: connect a Phenikaa account'}</h2><p>{'Chọn khoảng thời gian học tập, sau đó đăng nhập một lần. Máy chủ mã hóa và tự động theo dõi phiên của bạn.' if vi else 'Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.'}</p><form method="post" action="/sessions">
         <input type="hidden" name="csrf" value="{csrf}"><label>Name <input name="label" value="Phenikaa account"></label>
-        <label>From <input type="date" name="range_start" value="{start.isoformat()}"></label>
-        <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button class="button button--primary">Create and sign in</button></form></section>
+         <label>{text['from']} <input type="date" name="range_start" value="{start.isoformat()}"></label>
+         <label>{text['to']} <input type="date" name="range_end" value="{end.isoformat()}"></label><button class="button button--primary">{'Tạo và đăng nhập' if vi else 'Create and sign in'}</button></form></section>
         """
         summary_markup = f"<section class=\"summary-grid\">{''.join(summary)}</section>" if summary else ""
+        export_form = f"""<section class=\"export-panel\"><div class=\"section-heading\"><div><p class=\"eyebrow\">{text['export_eyebrow']}</p><h2>{text['export_title']}</h2></div><p class=\"page-description\">{text['export_description']}</p></div>
+         <form class=\"export-form\" method=\"post\" action=\"/export\" enctype=\"multipart/form-data\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
+        <div class=\"date-row\"><label>From <input required type=\"date\" name=\"range_start\" value=\"{start.isoformat()}\"></label>
+        <label>To <input required type=\"date\" name=\"range_end\" value=\"{end.isoformat()}\"></label></div>
+         <div class=\"credential-grid\"><fieldset><legend>{text['saved']}</legend><label>{text['html']}<input type=\"file\" name=\"bootstrap_file\" accept=\".html,text/html\"></label><p class=\"hint\">{text['file_hint']}</p></fieldset>
+        <div class=\"or\" aria-hidden=\"true\">{text['or']}</div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name=\"userId\" autocomplete=\"off\"></label><label>Token JWT<input type=\"password\" name=\"tokenJWT\" autocomplete=\"off\"></label><p class=\"hint\">{text['manual_hint']}</p></fieldset></div>
+        <button class=\"button button--primary\" type=\"submit\">{text['export']}</button></form></section>"""
         body = f"""
         {self._navigation(user, identity, "dashboard", language)}
-        <main><div class="section-heading"><div><p class="eyebrow">Calendar sessions</p><h2>Your calendar sessions</h2><p class="page-description">Connect, configure, and export your academic calendar from one place.</p></div></div>{summary_markup}{new_session_form}
-        {''.join(rows) or '<section class="empty-state"><p class="eyebrow">NO ACTIVE SOURCE</p><h2>Your workspace is ready.</h2><p>Connect your Phenikaa account above to begin observing and exporting your academic calendar.</p></section>'}</main>"""
+         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']}</p></div></div>{export_form}{summary_markup}{new_session_form}
+         {''.join(rows) or f'<section class="empty-state"><p class="eyebrow">{"CHƯA CÓ NGUỒN HOẠT ĐỘNG" if vi else "NO ACTIVE SOURCE"}</p><h2>{"Không gian làm việc đã sẵn sàng." if vi else "Your workspace is ready."}</h2><p>{"Kết nối tài khoản Phenikaa ở trên để bắt đầu theo dõi và xuất lịch học của bạn." if vi else "Connect your Phenikaa account above to begin observing and exporting your academic calendar."}</p></section>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
+
+    def _landing(self, handler: BaseHTTPRequestHandler) -> None:
+        body = """
+        <header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><a class="button button--primary" href="/auth/login">Login</a></header>
+        <main><section class="landing-hero"><div><p class="eyebrow">Your semester, made portable</p><h1>Carry your timetable beyond the portal.</h1>
+        <p class="hero-lede">Turn Phenikaa classes and exams into calendar files you control. Export once for Apple Calendar, Google Calendar, Outlook, or a spreadsheet. Syncing is entirely optional.</p>
+        <p><a class="button button--primary" href="/auth/login">Login to export</a></p></div>
+        <div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section>
+        <section class="feature-grid" aria-label="How it works"><article><span class="step">01</span><h2>Use your session</h2><p>Bring a saved authenticated page or provide your current portal token manually. Your password is never requested.</p></article>
+        <article><span class="step">02</span><h2>Choose your range</h2><p>Select the dates you need, from a single week to the full academic year.</p></article>
+        <article><span class="step">03</span><h2>Keep the files</h2><p>Download ICS, XLSX, and JSON together. The one-shot export does not connect to Google or start synchronization.</p></article></section></main>"""
+        self._html(handler, 200, self._layout("Phenikaa Calendar Exporter", body), no_store=True)
+
+    def _export(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> None:
+        try:
+            start_value, end_value = self._validated_range(
+                str(form.get("range_start") or ""), str(form.get("range_end") or "")
+            )
+        except ValueError as error:
+            self._error(handler, 400, str(error))
+            return
+        bootstrap_html = str(form.get("bootstrap_html") or "").strip()
+        user_id = str(form.get("userId") or "").strip()
+        token = str(form.get("tokenJWT") or "").strip()
+        has_html = bool(bootstrap_html)
+        has_manual = bool(user_id or token)
+        if has_html == has_manual:
+            self._error(handler, 400, "provide either saved HTML or manual credentials")
+            return
+        if has_manual and not (user_id and token):
+            self._error(handler, 400, "manual credentials require userId and tokenJWT")
+            return
+        try:
+            session = parse_bootstrap_html(bootstrap_html) if has_html else {"userId": user_id, "tokenJWT": token}
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            self._error(handler, 400, "saved HTML does not contain valid Phenikaa session data")
+            return
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                summary = self.calendar_exporter(
+                    session,
+                    date.fromisoformat(start_value),
+                    date.fromisoformat(end_value),
+                    directory,
+                    "calendar",
+                    "Phenikaa Learning Calendar",
+                )
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    for extension in ("json", "xlsx", "ics"):
+                        archive.write(str(summary[extension]), arcname=f"calendar.{extension}")
+                body = output.getvalue()
+        except Exception:
+            self._error(handler, 502, "calendar export failed; check the credentials and date range")
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/zip")
+        handler.send_header("Content-Disposition", 'attachment; filename="phenikaa-calendar-export.zip"')
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
 
     def _settings(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         language = self._language(handler)
         csrf = html.escape(str(identity["csrf"]))
+        vi = language == "vi"
         delete_title = "Xóa tài khoản" if language == "vi" else "Delete account"
         delete_copy = (
             "Xóa phiên Phenikaa, dữ liệu xuất và kết nối Google của bạn. Hành động này không thể hoàn tác."
@@ -454,14 +574,14 @@ class ServerApplication:
             else "Delete your Phenikaa session, exports, and Google connections. This cannot be undone."
         )
         session_settings = "".join(
-            f"""<div class="managed-session"><div><strong>{html.escape(str(session["label"]))}</strong><p>{html.escape(STATUS_LABELS.get(str(session["status"]), "Unknown"))}</p></div><form method="post" action="/sessions/{html.escape(str(session["id"]))}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">Delete session</button></form></div>"""
+            f"""<div class="managed-session"><div><strong>{html.escape(str(session["label"]))}</strong><p>{html.escape(self._status_label(str(session["status"]), language))}</p></div><form method="post" action="/sessions/{html.escape(str(session["id"]))}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Xóa phiên' if vi else 'Delete session'}</button></form></div>"""
             for session in self.database.list_sessions(int(user["id"]))
         )
-        session_management = f"<section class=\"settings-card\"><p class=\"eyebrow\">SESSION MANAGEMENT</p><h2>Phenikaa sessions</h2>{session_settings or '<p class=\"text-muted\">No sessions connected.</p>'}</section>"
+        session_management = f"<section class=\"settings-card\"><p class=\"eyebrow\">{'QUẢN LÝ PHIÊN' if vi else 'SESSION MANAGEMENT'}</p><h2>{'Các phiên Phenikaa' if vi else 'Phenikaa sessions'}</h2>{session_settings or f'<p class=\"text-muted\">{"Chưa có phiên nào được kết nối." if vi else "No sessions connected."}</p>'}</section>"
         body = f"""
         {self._navigation(user, identity, "settings", language)}
-        <main><div class="section-heading"><div><p class="eyebrow">PREFERENCES</p><h2>{'Cài đặt' if language == 'vi' else 'Settings'}</h2></div><span class="section-rule"></span></div>
-        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">DANGER ZONE</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}"><label>{'Nhập DELETE để xác nhận' if language == 'vi' else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
+        <main><div class="section-heading"><div><p class="eyebrow">{'TÙY CHỈNH' if vi else 'PREFERENCES'}</p><h2>{'Cài đặt' if vi else 'Settings'}</h2></div><span class="section-rule"></span></div>
+        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">{'KHU VỰC NGUY HIỂM' if vi else 'DANGER ZONE'}</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}"><label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
         self._html(handler, 200, self._layout("Settings", body), no_store=True)
 
     def _navigation(self, user: dict[str, Any], identity: dict[str, Any], active: str, language: str) -> str:
@@ -476,27 +596,33 @@ class ServerApplication:
     def _language(self, handler: BaseHTTPRequestHandler) -> str:
         return "vi" if self._cookie(handler, LANGUAGE_COOKIE) == "vi" else "en"
 
-    def _friendly_timestamp(self, value: object) -> str:
+    def _status_label(self, status: str, language: str) -> str:
+        if language == "vi":
+            return {"pending_login": "Cần thao tác", "active": "Đã kết nối", "needs_human": "Cần chú ý", "disabled": "Đã tắt"}.get(status, "Không rõ")
+        return STATUS_LABELS.get(status, "Unknown")
+
+    def _friendly_timestamp(self, value: object, language: str = "en") -> str:
         if not value:
-            return "Last synced: Not yet"
+            return "Đồng bộ lần cuối: Chưa có" if language == "vi" else "Last synced: Not yet"
         try:
             timestamp = datetime.fromisoformat(str(value))
         except ValueError:
-            return "Last synced: Unknown"
+            return "Đồng bộ lần cuối: Không rõ" if language == "vi" else "Last synced: Unknown"
         formatted = timestamp.strftime("%b %d, %Y at %I:%M %p").replace(" 0", " ")
-        return "Last synced: " + formatted
+        return ("Đồng bộ lần cuối: " if language == "vi" else "Last synced: ") + formatted
 
-    def _google_status_markup(self, session_id: str, csrf: str) -> str:
+    def _google_status_markup(self, session_id: str, csrf: str, language: str = "en") -> str:
         sid = html.escape(session_id)
+        vi = language == "vi"
         if self.google is None:
-            return "<p>Google Calendar: <strong>Unavailable</strong></p>"
+            return f"<p>Google Calendar: <strong>{'Không khả dụng' if vi else 'Unavailable'}</strong></p>"
         connection = self.database.get_google_connection(session_id)
         if connection is None:
-            return f"<p>Google Calendar: <strong>Not connected</strong> <a href=\"/sessions/{sid}/google/connect\">Connect</a></p>"
+            return f"<p>Google Calendar: <strong>{'Chưa kết nối' if vi else 'Not connected'}</strong> <a href=\"/sessions/{sid}/google/connect\">{'Kết nối' if vi else 'Connect'}</a></p>"
         last_error = html.escape(str(connection.get("last_error") or ""))
         error = f"<p>{last_error}</p>" if last_error else ""
-        return f"""<p>Google Calendar: <strong>Connected</strong></p>{error}
-            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">Disconnect Google</button></form>"""
+        return f"""<p>Google Calendar: <strong>{'Đã kết nối' if vi else 'Connected'}</strong></p>{error}
+            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Ngắt kết nối Google' if vi else 'Disconnect Google'}</button></form>"""
 
     def _login_page(self, handler: BaseHTTPRequestHandler, session: dict[str, Any], identity: dict[str, Any]) -> None:
         sid = str(session["id"])
@@ -597,6 +723,47 @@ class ServerApplication:
             return {}
         values = urllib.parse.parse_qs(handler.rfile.read(length).decode("utf-8")) if length else {}
         return {key: items[0] for key, items in values.items() if items}
+
+    def _read_export_form(self, handler: BaseHTTPRequestHandler) -> dict[str, str]:
+        content_type = handler.headers.get("Content-Type") or ""
+        try:
+            length = int(handler.headers.get("Content-Length") or 0)
+        except ValueError as error:
+            raise ValueError("invalid content length") from error
+        if length > MAX_EXPORT_FORM_BYTES:
+            raise OverflowError("export form is too large")
+        if length <= 0:
+            return {}
+        raw = handler.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("incomplete form submission")
+        if content_type.startswith("multipart/form-data"):
+            return self._parse_export_multipart(content_type, raw)
+        if "application/x-www-form-urlencoded" not in content_type:
+            raise ValueError("unsupported content type")
+        values = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=False)
+        return {key: items[0] for key, items in values.items() if items}
+
+    def _parse_export_multipart(self, content_type: str, raw: bytes) -> dict[str, str]:
+        message = BytesParser(policy=default).parsebytes(
+            b"Content-Type: " + content_type.encode("ascii") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw
+        )
+        if not message.is_multipart():
+            raise ValueError("invalid multipart form")
+        values: dict[str, str] = {}
+        for part in message.iter_parts():
+            field_name = part.get_param("name", header="content-disposition")
+            if not field_name or field_name in values:
+                continue
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                values[field_name] = payload.decode(charset)
+            except (LookupError, UnicodeDecodeError) as error:
+                raise ValueError("invalid multipart field") from error
+        if "bootstrap_file" in values:
+            values["bootstrap_html"] = values.pop("bootstrap_file")
+        return values
 
     def _read_json(self, handler: BaseHTTPRequestHandler) -> Any:
         length = min(int(handler.headers.get("Content-Length") or 0), 64 * 1024)

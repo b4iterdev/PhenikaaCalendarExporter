@@ -31,6 +31,17 @@ ${PHENIKAA_SERVER_BASE_URL}/privacy
 ${PHENIKAA_SERVER_BASE_URL}/terms
 ```
 
+## One-shot web export
+
+The public home page links to OIDC login. After authentication, the dashboard offers **Download without syncing**, which accepts exactly one Phenikaa authentication source:
+
+- Paste a saved authenticated `index.aspx` response containing `AXYZCLRVN`.
+- Enter both the portal `userId` and raw `tokenJWT` manually.
+
+Submitted credentials remain in process memory only for that request. The server does not add them to SQLite, retain the HTML, create a browser profile, start background synchronization, or contact Google. The response is `phenikaa-calendar-export.zip`, containing `calendar.json`, `calendar.xlsx`, and `calendar.ics`. The form body is limited to 1 MiB.
+
+Saved HTML and JWTs are bearer credentials. Do not share them, and delete saved HTML after export.
+
 ## Optional Google Calendar sync
 
 Google Calendar integration is server-only and does not change the CLI. It performs one-way sync from Phenikaa to a dedicated Google calendar created by this app named `Phenikaa Learning Calendar`. Sync creates new linked events, updates previously linked events, and deletes stale app-owned linked events that disappeared from the Phenikaa range inside that dedicated calendar. Unrelated Google Calendar events are not touched. Calendar selection, two-way sync, and Google webhooks are not implemented.

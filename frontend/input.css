@@ -113,6 +113,82 @@
     @apply mt-2 max-w-2xl text-sm leading-6 text-muted-foreground;
   }
 
+  .landing-hero {
+    @apply grid items-center gap-10 border-0 bg-transparent p-0 py-12 shadow-none sm:grid-cols-[minmax(0,1.35fr)_minmax(260px,.65fr)] sm:gap-16 sm:py-20;
+  }
+
+  .landing-hero h1 {
+    @apply max-w-4xl text-5xl font-normal leading-[.9] tracking-[-.055em] sm:text-7xl lg:text-8xl;
+  }
+
+  .hero-lede {
+    @apply max-w-2xl text-lg leading-7 sm:text-xl;
+  }
+
+  .calendar-mark {
+    @apply grid aspect-[4/5] max-w-sm grid-rows-[auto_1fr_auto] rotate-2 bg-destructive p-6 text-destructive-foreground shadow-[12px_12px_0_hsl(var(--primary))] sm:justify-self-end;
+  }
+
+  .calendar-mark span, .calendar-mark small, .step {
+    @apply font-mono text-xs font-semibold uppercase tracking-[.1em];
+  }
+
+  .calendar-mark strong {
+    @apply self-center text-8xl font-normal leading-none;
+  }
+
+  .feature-grid {
+    @apply grid gap-0 border bg-card md:grid-cols-3;
+  }
+
+  .feature-grid article {
+    @apply m-0 rounded-none border-0 border-b bg-transparent shadow-none md:border-b-0 md:border-r;
+  }
+
+  .feature-grid article:last-child {
+    @apply border-0;
+  }
+
+  .export-panel {
+    @apply p-5 sm:p-8;
+  }
+
+  .export-form {
+    @apply block;
+  }
+
+  .date-row {
+    @apply grid max-w-lg gap-3 sm:grid-cols-2;
+  }
+
+  .credential-grid {
+    @apply mt-5 grid items-center gap-4 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)];
+  }
+
+  .export-form > .button--primary {
+    @apply mt-2;
+  }
+
+  fieldset {
+    @apply min-w-0 rounded-xl border p-4;
+  }
+
+  legend {
+    @apply px-1 font-semibold;
+  }
+
+  textarea {
+    @apply min-h-32 w-full rounded-xl border bg-card px-3 py-2.5 text-sm text-foreground;
+  }
+
+  .hint {
+    @apply text-xs leading-5 text-muted-foreground;
+  }
+
+  .or {
+    @apply text-center italic text-muted-foreground;
+  }
+
   .section-rule {
     @apply mb-3 h-px flex-1 bg-border;
   }
@@ -278,7 +354,11 @@
   }
 
   .danger-zone {
-    @apply border-destructive/20;
+    @apply border-l-4 border-destructive/60 bg-destructive/5;
+  }
+
+  .danger-zone .text-muted {
+    @apply text-base font-medium leading-7 text-foreground;
   }
 
   footer {

@@ -8,6 +8,7 @@ import unittest
 import urllib.parse
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 import phenikaa_exporter as pe
 import phenikaa_login as pl
@@ -61,6 +62,11 @@ class CryptoProtocolTests(unittest.TestCase):
         blob = pe.xor_b64_encode(json.dumps(payload), "AzzS")
         html = f'<script>AXYZCLRVN = () => "{blob}"</script>'
         self.assertEqual(pe.parse_bootstrap_html(html), payload)
+
+    def test_decode_bootstrap_blob_rejects_non_object_json(self):
+        blob = pe.xor_b64_encode("[]", pe.BOOTSTRAP_KEY)
+        with self.assertRaisesRegex(ValueError, "bootstrap data is invalid"):
+            pe.decode_bootstrap_blob(blob)
 
 
 class BrowserLoginCaptureTests(unittest.TestCase):
@@ -141,6 +147,47 @@ class ApiAndCacheTests(unittest.TestCase):
         self.assertEqual(received["auth"], "Bearer secret-token")
         self.assertEqual(received["payload"]["strNgayBatDau"], "01/08/2026")
         self.assertTrue(received["path"].endswith(pe.CALENDAR_ACTION))
+
+    def test_export_calendar_files_writes_all_outputs_and_sanitized_summary(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session = {"userId": "student-id", "tokenJWT": "secret-token"}
+            with mock.patch.object(pe, "fetch_calendar", return_value=SAMPLE_EVENTS) as fetch_calendar:
+                summary = pe.export_calendar_files(
+                    session, date(2026, 8, 1), date(2026, 10, 31), root / "out", "semester", "Semester Calendar",
+                    base_url="http://127.0.0.1:9",
+                )
+            self.assertEqual(fetch_calendar.call_count, 1)
+            self.assertEqual(fetch_calendar.call_args.args[0], session)
+            self.assertEqual(fetch_calendar.call_args.args[1], date(2026, 8, 1))
+            self.assertEqual(fetch_calendar.call_args.kwargs["base_url"], "http://127.0.0.1:9")
+            self.assertTrue((root / "out" / "semester.json").exists())
+            self.assertTrue((root / "out" / "semester.xlsx").exists())
+            self.assertTrue((root / "out" / "semester.ics").exists())
+            self.assertEqual(summary["events"], 2)
+            self.assertEqual(summary["classes"], 1)
+            self.assertEqual(summary["exams"], 1)
+            self.assertEqual(summary["date_start"], "2026-08-24")
+            self.assertEqual(summary["date_end"], "2026-10-28")
+            dumped = json.dumps(summary, ensure_ascii=False)
+            self.assertNotIn("secret-token", dumped)
+            self.assertNotIn("Authorization", dumped)
+            self.assertNotIn("AXYZCLRVN", dumped)
+
+    def test_export_calendar_files_rejects_empty_event_list(self):
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(pe, "fetch_calendar", return_value=[]):
+                with self.assertRaisesRegex(RuntimeError, "no calendar events"):
+                    pe.export_calendar_files(
+                        {"userId": "student-id", "tokenJWT": "secret-token"}, date(2026, 8, 1), date(2026, 10, 31),
+                        Path(td) / "out", "semester", "Semester Calendar",
+                    )
+
+    def test_cli_rejects_reverse_range_before_loading_credentials(self):
+        with mock.patch.object(pe, "_load_session") as load_session:
+            with self.assertRaisesRegex(ValueError, "start date"):
+                pe.main(["--start", "2026-10-31", "--end", "2026-08-01", "--auth-json", "unused.json"])
+        load_session.assert_not_called()
     def test_cli_exports_xlsx_ics_and_source_json(self):
         response_body = json.dumps({"Success": True, "Data": {"B": pe.xor_b64_encode(json.dumps(SAMPLE_EVENTS), "AzzSystem")}}).encode()
 

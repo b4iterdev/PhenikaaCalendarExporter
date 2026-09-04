@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import re
@@ -44,7 +45,12 @@ def xor_b64_decode(encoded: str, key: str) -> str:
 
 
 def decode_bootstrap_blob(blob: str) -> dict[str, Any]:
-    session = json.loads(xor_b64_decode(blob, BOOTSTRAP_KEY))
+    try:
+        session = json.loads(xor_b64_decode(blob, BOOTSTRAP_KEY))
+    except (binascii.Error, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("bootstrap data is invalid") from error
+    if not isinstance(session, dict):
+        raise ValueError("bootstrap data is invalid")
     missing = {"userId", "tokenJWT"} - session.keys()
     if missing:
         raise ValueError(f"bootstrap data is missing: {', '.join(sorted(missing))}")
@@ -344,6 +350,40 @@ def _load_session(args: argparse.Namespace) -> dict[str, Any]:
     return extract_auth_from_cache(args.cache_dir)
 
 
+def export_calendar_files(
+    session: dict[str, Any],
+    start: date,
+    end: date,
+    output_dir: Path | str,
+    prefix: str,
+    calendar_name: str,
+    *,
+    base_url: str = PORTAL_BASE_URL,
+) -> dict[str, Any]:
+    validate_date_range(start, end)
+    events = fetch_calendar(session, start, end, base_url=base_url)
+    if not events:
+        raise RuntimeError("the API returned no calendar events for the requested range")
+    destination_dir = Path(output_dir).expanduser()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    json_path = destination_dir / f"{prefix}.json"
+    xlsx_path = destination_dir / f"{prefix}.xlsx"
+    ics_path = destination_dir / f"{prefix}.ics"
+    json_path.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_xlsx(xlsx_path, events)
+    write_ics(ics_path, events, calendar_name=calendar_name)
+    return {
+        "events": len(events),
+        "classes": sum(event.get("PHANLOAI") != "LICHTHI" for event in events),
+        "exams": sum(event.get("PHANLOAI") == "LICHTHI" for event in events),
+        "date_start": event_datetime(events[0]).date().isoformat(),
+        "date_end": event_datetime(events[-1]).date().isoformat(),
+        "json": str(json_path.resolve()),
+        "xlsx": str(xlsx_path.resolve()),
+        "ics": str(ics_path.resolve()),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export an authenticated Phenikaa learning calendar to XLSX, ICS, and JSON.")
     parser.add_argument("--start", required=True, type=_iso_date, help="Inclusive start date, YYYY-MM-DD")
@@ -365,27 +405,16 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     validate_date_range(args.start, args.end)
     session = _load_session(args)
-    events = fetch_calendar(session, args.start, args.end, base_url=args.base_url)
-    if not events:
-        raise RuntimeError("the API returned no calendar events for the requested range")
-    output_dir = Path(args.out_dir).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    source_path = output_dir / f"{args.prefix}.json"
-    xlsx_path = output_dir / f"{args.prefix}.xlsx"
-    ics_path = output_dir / f"{args.prefix}.ics"
-    source_path.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
-    write_xlsx(xlsx_path, events)
-    write_ics(ics_path, events, calendar_name=args.calendar_name)
-    print(json.dumps({
-        "events": len(events),
-        "classes": sum(event.get("PHANLOAI") != "LICHTHI" for event in events),
-        "exams": sum(event.get("PHANLOAI") == "LICHTHI" for event in events),
-        "date_start": event_datetime(events[0]).date().isoformat(),
-        "date_end": event_datetime(events[-1]).date().isoformat(),
-        "json": str(source_path.resolve()),
-        "xlsx": str(xlsx_path.resolve()),
-        "ics": str(ics_path.resolve()),
-    }, ensure_ascii=False, indent=2))
+    summary = export_calendar_files(
+        session,
+        args.start,
+        args.end,
+        args.out_dir,
+        args.prefix,
+        args.calendar_name,
+        base_url=args.base_url,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
