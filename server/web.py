@@ -42,7 +42,7 @@ STATUS_LABELS = {
     "active": "Connected",
     "needs_human": "Attention needed",
     "disabled": "Disabled",
-}
+         }
 MAX_EXPORT_FORM_BYTES = 1024 * 1024
 
 
@@ -133,6 +133,9 @@ class ServerApplication:
         if path == "/terms":
             self._html(handler, 200, self._layout("Terms of Service", terms_body(self.config.policy_contact)))
             return
+        if path == "/about":
+            self._about(handler)
+            return
         if path == "/auth/login":
             self._start_oidc(handler)
             return
@@ -145,7 +148,10 @@ class ServerApplication:
         identity = self._identity(handler)
         if identity is None:
             if path == "/":
-                self._landing(handler)
+                self._public_export(handler)
+                return
+            if path == "/dashboard":
+                self._redirect(handler, "/auth/login")
                 return
             self._redirect(handler, "/auth/login")
             return
@@ -156,11 +162,14 @@ class ServerApplication:
                 self._error(handler, 400, "unsupported language")
                 return
             target = (urllib.parse.parse_qs(parsed.query).get("return") or ["/"])[0]
-            if target not in ("/", "/settings"):
+            if target not in ("/", "/dashboard", "/about", "/settings"):
                 target = "/"
             self._redirect_language(handler, target, language)
             return
         if path == "/":
+            self._public_export(handler)
+            return
+        if path == "/dashboard":
             self._dashboard(handler, user, identity)
             return
         if path == "/settings":
@@ -191,7 +200,7 @@ class ServerApplication:
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         path = urllib.parse.urlsplit(handler.path).path
         identity = self._identity(handler)
-        if identity is None:
+        if identity is None and path != "/export":
             self._error(handler, 401, "authentication required")
             return
         try:
@@ -202,11 +211,15 @@ class ServerApplication:
         except (UnicodeError, ValueError):
             self._error(handler, 400, "invalid form submission")
             return
-        if not self._csrf_valid(handler, identity, form):
+        csrf_valid = self._public_csrf_valid(handler, form) if identity is None else self._csrf_valid(handler, identity, form)
+        if not csrf_valid:
             self._error(handler, 403, "invalid CSRF token")
             return
         if path == "/export":
             self._export(handler, form)
+            return
+        if identity is None:
+            self._error(handler, 401, "authentication required")
             return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
         if path == "/auth/logout":
@@ -436,25 +449,25 @@ class ServerApplication:
         finally:
             lock.release()
         self.sync_engine.request_sync(str(session["id"]))
-        self._redirect(handler, "/", clear_cookie=clear_google_cookie)
+        self._redirect(handler, "/dashboard", clear_cookie=clear_google_cookie)
 
     def _dashboard(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         csrf = html.escape(str(identity["csrf"]))
         language = self._language(handler)
         vi = language == "vi"
         text = {
-            "sessions": "Các phiên lịch của bạn" if vi else "Your calendar sessions",
-            "description": "Kết nối, cấu hình và xuất lịch học của bạn từ một nơi." if vi else "Connect, configure, and export your academic calendar from one place.",
-            "export_eyebrow": "Xuất một lần" if vi else "One-shot export",
-            "export_title": "Tải xuống không đồng bộ" if vi else "Download without syncing",
-            "export_description": "Thông tin đăng nhập chỉ được giữ trong bộ nhớ cho yêu cầu này và không được thêm vào phiên trên máy chủ." if vi else "Credentials stay in memory for this request and are not added to a server session.",
-            "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
+             "sessions": "Các phiên lịch của bạn" if vi else "Your calendar sessions",
+             "description": "Kết nối, cấu hình và xuất lịch học của bạn từ một nơi." if vi else "Connect, configure, and export your academic calendar from one place.",
+              "export_eyebrow": "Tạo lịch nhanh" if vi else "Quick export",
+             "export_title": "Tạo file lịch" if vi else "Download calendar file",
+             "export_description": "" if vi else "",
+             "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
             "saved": "Trang đã xác thực" if vi else "Saved authenticated page",
             "html": "HTML index.aspx đã xác thực" if vi else "Authenticated index.aspx HTML",
             "file_hint": "Chọn mã nguồn trang đã lưu có chứa AXYZCLRVN. Tệp có token riêng tư; hãy xóa tệp sau khi hoàn tất." if vi else "Choose the saved page source containing AXYZCLRVN. The file contains a private token; delete it when finished.",
-            "manual": "Phiên thủ công" if vi else "Manual session", "user_id": "ID người dùng" if vi else "User ID",
-            "manual_hint": "Cung cấp cả hai trường và để trống trường trang đã lưu." if vi else "Provide both fields and leave the saved-page field empty.",
-            "export": "Xuất tệp lịch" if vi else "Export calendar files", "or": "hoặc" if vi else "or",
+             "manual": "Phiên thủ công" if vi else "Manual session", "user_id": "ID người dùng" if vi else "User ID",
+             "manual_hint": "Cung cấp cả hai trường và để trống trường trang đã lưu." if vi else "Provide both fields and leave the saved-page field empty.",
+              "export": "Tạo lịch" if vi else "Download calendar file", "or": "HOẶC" if vi else "OR",
         }
         rows = []
         summary = []
@@ -495,6 +508,7 @@ class ServerApplication:
          <div class=\"credential-grid\"><fieldset><legend>{text['saved']}</legend><label>{text['html']}<input type=\"file\" name=\"bootstrap_file\" accept=\".html,text/html\"></label><p class=\"hint\">{text['file_hint']}</p></fieldset>
         <div class=\"or\" aria-hidden=\"true\">{text['or']}</div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name=\"userId\" autocomplete=\"off\"></label><label>Token JWT<input type=\"password\" name=\"tokenJWT\" autocomplete=\"off\"></label><p class=\"hint\">{text['manual_hint']}</p></fieldset></div>
         <button class=\"button button--primary\" type=\"submit\">{text['export']}</button></form></section>"""
+        export_form = ""
         body = f"""
         {self._navigation(user, identity, "dashboard", language)}
          <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']}</p></div></div>{export_form}{summary_markup}{new_session_form}
@@ -512,6 +526,39 @@ class ServerApplication:
         <article><span class="step">02</span><h2>Choose your range</h2><p>Select the dates you need, from a single week to the full academic year.</p></article>
         <article><span class="step">03</span><h2>Keep the files</h2><p>Download ICS, XLSX, and JSON together. The one-shot export does not connect to Google or start synchronization.</p></article></section></main>"""
         self._html(handler, 200, self._layout("Phenikaa Calendar Exporter", body), no_store=True)
+
+    def _public_export(self, handler: BaseHTTPRequestHandler) -> None:
+        language = self._language(handler)
+        vi = language == "vi"
+        start, end = academic_year_range()
+        csrf = self.signed_sessions.create({"purpose": "public_export"}, lifetime=30 * 60)
+        empty_file_label = json.dumps("Chưa chọn file" if vi else "No file selected")
+        text = {
+             "eyebrow": "TẠO LỊCH NHANH" if vi else "QUICK EXPORT",
+            "title": "Tạo file lịch không cần đăng nhập" if vi else "Export your calendar without signing in",
+            "description": "Dùng file HTML đã lưu hoặc token hiện tại để tải lịch học." if vi else "Use a saved authenticated HTML page or your current token to download your calendar. Credentials are processed for this export only and are not stored.",
+             "saved": "File HTML" if vi else "HTML file",
+             "file_prompt": "Kéo thả file HTML hoặc bấm để chọn" if vi else "Drop an HTML file here or click to choose",
+            "html": "" if vi else "",
+             "file_hint": "Mở trang lịch học trên QLDT, nhấn Ctrl + S để lưu trang, sau đó chọn file HTML vừa lưu." if vi else "Open your timetable on QLDT, press Ctrl + S to save the page, then choose the HTML file you saved.",
+             "manual": "Nhập thông tin thủ công" if vi else "Enter details manually",
+             "user_id": "ID người dùng" if vi else "User ID",
+            "manual_hint": "Cung cấp cả hai trường và để trống file HTML." if vi else "Provide both fields and leave the HTML file empty.",
+            "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
+             "or": "HOẶC" if vi else "OR", "submit": "Xuất tệp lịch" if vi else "Export calendar files",
+        }
+        body = f"""{self._navigation(None, None, "export", language)}
+          <main><section class="export-shell"><div class="export-copy"><p class="eyebrow">{text['eyebrow']}</p><h1>{text['title']}</h1><p class="hero-lede">{text['description']}</p>
+          <form class="export-form" method="post" action="/export" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{csrf}"><div class="date-row"><label>{text['from']} <input required type="date" name="range_start" value="{start.isoformat()}"></label><label>{text['to']} <input required type="date" name="range_end" value="{end.isoformat()}"></label></div>
+          <div class="credential-grid"><fieldset><legend>{text['saved']}</legend><label class="file-dropzone" for="bootstrap-file"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="file-dropzone__copy"><strong>{text['file_prompt']}</strong><small class="file-name" aria-live="polite">{'Chưa chọn file' if vi else 'No file selected'}</small></span><input id="bootstrap-file" type="file" name="bootstrap_file" accept=".html,text/html"></label><p class="hint">{text['file_hint']}</p></fieldset><div class="or" aria-hidden="true"><span>{text['or']}</span></div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name="userId" autocomplete="off"></label><label>{'Mã Token' if vi else 'Access token'}<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">{text['manual_hint']}</p></fieldset></div><button class="button button--primary" type="submit">{text['submit']}</button></form></div><div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section></main>
+          <script>const dropzone=document.querySelector('.file-dropzone');const fileInput=document.querySelector('#bootstrap-file');const fileName=document.querySelector('.file-name');if(dropzone&&fileInput&&fileName){{const showFile=()=>{{fileName.textContent=fileInput.files[0]?.name||{empty_file_label};}};['dragenter','dragover'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.add('file-dropzone--active');}}));['dragleave','drop'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.remove('file-dropzone--active');}}));dropzone.addEventListener('drop',e=>{{if(e.dataTransfer.files.length){{fileInput.files=e.dataTransfer.files;showFile();}}}});fileInput.addEventListener('change',showFile);}}</script>"""
+        self._html(handler, 200, self._layout("Quick export", body), no_store=True)
+
+    def _about(self, handler: BaseHTTPRequestHandler) -> None:
+        language = self._language(handler)
+        vi = language == "vi"
+        body = f"""{self._navigation(None, None, "about", language)}<main><section class="landing-hero"><div><p class="eyebrow">ABOUT</p><h1>{'Lịch học của bạn, dễ mang theo.' if vi else 'Your timetable, made portable.'}</h1><p class="hero-lede">{'Phenikaa Calendar Exporter chuyển lịch học và lịch thi thành các file ICS, XLSX và JSON để bạn dùng ở nơi mình muốn.' if vi else 'Phenikaa Calendar Exporter turns your classes and exams into ICS, XLSX, and JSON files you can use wherever you work.'}</p></div></section><section class="feature-grid" aria-label="About the exporter"><article><span class="step">01</span><h2>{'Tạo file lịch nhanh' if vi else 'Quick export'}</h2><p>{'Không cần đăng nhập. Dùng file HTML đã xác thực hoặc userId và tokenJWT. Thông tin không được lưu.' if vi else 'No account required. Use a saved authenticated HTML page or userId and tokenJWT. Nothing is stored.'}</p></article><article><span class="step">02</span><h2>{'Bảng điều khiển' if vi else 'Dashboard'}</h2><p>{'Đăng nhập để giữ phiên Phenikaa, tự động đồng bộ và kết nối Google Calendar.' if vi else 'Sign in to keep a Phenikaa session, sync automatically, and connect Google Calendar.'}</p></article><article><span class="step">03</span><h2>{'Riêng tư' if vi else 'Privacy'}</h2><p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p></article></section></main>"""
+        self._html(handler, 200, self._layout("About", body), no_store=True)
 
     def _export(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> None:
         try:
@@ -584,14 +631,26 @@ class ServerApplication:
         {session_management}<section class="settings-card danger-zone"><p class="eyebrow">{'KHU VỰC NGUY HIỂM' if vi else 'DANGER ZONE'}</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}"><label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
         self._html(handler, 200, self._layout("Settings", body), no_store=True)
 
-    def _navigation(self, user: dict[str, Any], identity: dict[str, Any], active: str, language: str) -> str:
-        csrf = html.escape(str(identity["csrf"]))
+    def _navigation(self, user: dict[str, Any] | None, identity: dict[str, Any] | None, active: str, language: str) -> str:
+        vi = language == "vi"
+        export_label = "Tạo lịch nhanh" if vi else "Quick export"
         dashboard_label = "Bảng điều khiển" if language == "vi" else "Dashboard"
         settings_label = "Cài đặt" if language == "vi" else "Settings"
         sign_out = "Đăng xuất" if language == "vi" else "Sign out"
+        about_label = "Giới thiệu" if vi else "About"
+        active_export = " nav-link--active" if active == "export" else ""
         active_dashboard = " nav-link--active" if active == "dashboard" else ""
         active_settings = " nav-link--active" if active == "settings" else ""
-        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_dashboard}" href="/">{dashboard_label}</a><a class="nav-link{active_settings}" href="/settings">{settings_label}</a></nav><div class="header-meta"><div class="language-toggle"><a class="language-option{' language-option--active' if language == 'vi' else ''}" href="/language?lang=vi&return=%2F{('settings' if active == 'settings' else '')}">VI</a><a class="language-option{' language-option--active' if language == 'en' else ''}" href="/language?lang=en&return=%2F{('settings' if active == 'settings' else '')}">EN</a></div><span>{html.escape(str(user['display_name']))}</span><form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{csrf}"><button class="text-button">{sign_out}</button></form></div></header>"""
+        target = {"export": "/", "dashboard": "/dashboard", "about": "/about", "settings": "/settings"}.get(active, "/")
+        language_links = f"<a class=\"language-option{' language-option--active' if language == 'vi' else ''}\" href=\"/language?lang=vi&return={urllib.parse.quote(target)}\">VI</a><a class=\"language-option{' language-option--active' if language == 'en' else ''}\" href=\"/language?lang=en&return={urllib.parse.quote(target)}\">EN</a>"
+        account = ""
+        if user is not None and identity is not None:
+            csrf = html.escape(str(identity["csrf"]))
+            account = f"<span>{html.escape(str(user['display_name']))}</span><a class=\"nav-link{' nav-link--active' if active == 'settings' else ''}\" href=\"/settings\">{settings_label}</a><form method=\"post\" action=\"/auth/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button class=\"text-button\">{sign_out}</button></form>"
+        else:
+            account = f"<a class=\"button button--primary\" href=\"/auth/login\">{'Đăng nhập' if vi else 'Sign in'}</a>"
+        dashboard = f'<a class="nav-link{active_dashboard}" href="/dashboard">{dashboard_label}</a>' if user is not None else f'<a class="nav-link" href="/dashboard">{dashboard_label}</a>'
+        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}<a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
 
     def _language(self, handler: BaseHTTPRequestHandler) -> str:
         return "vi" if self._cookie(handler, LANGUAGE_COOKIE) == "vi" else "en"
@@ -649,7 +708,7 @@ class ServerApplication:
         img.onclick=e=>{{const r=img.getBoundingClientRect();send({{type:'click',x:(e.clientX-r.left)*img.naturalWidth/r.width,y:(e.clientY-r.top)*img.naturalHeight/r.height}});img.focus()}};
         document.onkeydown=e=>{{if(['Shift','Control','Alt','Meta','CapsLock'].includes(e.key))return;e.preventDefault();send(e.key.length===1?{{type:'char',key:e.key}}:{{type:'special',key:e.key}})}};
         document.onpaste=e=>{{const text=e.clipboardData.getData('text');if(text)send({{type:'insert',text}})}};
-        setInterval(async()=>{{const r=await fetch('/sessions/{sid}/status.json');const s=await r.json();document.getElementById('status').textContent=s.status;if(s.status==='active')location='/' }},1500);
+         setInterval(async()=>{{const r=await fetch('/sessions/{sid}/status.json');const s=await r.json();document.getElementById('status').textContent=s.status;if(s.status==='active')location='/dashboard' }},1500);
         </script>"""
         self._html(handler, 200, self._layout("Phenikaa sign-in", body), no_store=True)
 
@@ -706,6 +765,11 @@ class ServerApplication:
     def _csrf_valid(self, handler: BaseHTTPRequestHandler, identity: dict[str, Any], form: dict[str, str]) -> bool:
         supplied = handler.headers.get("X-CSRF-Token") or form.get("csrf") or ""
         return secrets.compare_digest(str(identity.get("csrf", "")), supplied)
+
+    def _public_csrf_valid(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> bool:
+        supplied = handler.headers.get("X-CSRF-Token") or form.get("csrf") or ""
+        token = self.signed_sessions.verify(str(supplied))
+        return bool(token and token.get("purpose") == "public_export")
 
     def _validated_range(self, start_value: str, end_value: str) -> tuple[str, str]:
         try:

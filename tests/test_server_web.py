@@ -135,7 +135,7 @@ class WebSmokeTests(unittest.TestCase):
             thread.start()
             try:
                 connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
-                connection.request("GET", "/")
+                connection.request("GET", "/dashboard")
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.getheader("Cache-Control"), "no-store")
@@ -163,7 +163,7 @@ class WebSmokeTests(unittest.TestCase):
                 sessions = database.list_sessions()
                 self.assertEqual(len(sessions), 1)
                 session_id = sessions[0]["id"]
-                connection.request("GET", "/")
+                connection.request("GET", "/dashboard")
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 payload = response.read()
@@ -212,7 +212,7 @@ class WebSmokeTests(unittest.TestCase):
                 server.server_close()
                 database.close()
 
-    def test_public_home_has_login_and_authenticated_dashboard_has_export_form(self):
+    def test_public_export_and_authenticated_dashboard_are_separate(self):
         with tempfile.TemporaryDirectory() as directory:
             _config, database, signed_sessions, _sync, server, thread = self._start_app(directory, auth_mode="oidc")
             try:
@@ -220,18 +220,40 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(headers["Cache-Control"], "no-store")
                 self.assertIn(b'href="/auth/login"', body)
-                self.assertIn(b"Carry your timetable beyond the portal", body)
-                self.assertNotIn(b"tokenJWT", body)
-                app_cookie = self._app_cookie(signed_sessions)
-                status, _headers, body = self._request(
-                    server, "GET", "/", headers={"Cookie": f"phenikaa_server_session={app_cookie}"}
-                )
-                self.assertEqual(status, 200)
                 self.assertIn(b'action="/export"', body)
                 self.assertIn(b'name="bootstrap_file"', body)
-                self.assertIn(b'enctype="multipart/form-data"', body)
                 self.assertIn(b'name="userId"', body)
                 self.assertIn(b'name="tokenJWT"', body)
+                self.assertIn(b'class="export-shell"', body)
+                self.assertIn(b'class="file-dropzone"', body)
+                self.assertIn(b'Drop an HTML file here or click to choose', body)
+                self.assertIn(b'<legend>HTML file</legend>', body)
+                self.assertIn(b'Access token', body)
+                self.assertIn(b'class="or"', body)
+                status, _headers, body = self._request(
+                    server, "GET", "/", headers={"Cookie": "phenikaa_ui_language=vi"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("Tạo lịch nhanh".encode("utf-8"), body)
+                self.assertIn("TẠO LỊCH NHANH".encode("utf-8"), body)
+                self.assertIn("Mã Token".encode("utf-8"), body)
+                self.assertIn("Kéo thả file HTML hoặc bấm để chọn".encode("utf-8"), body)
+                self.assertIn("<legend>File HTML</legend>".encode("utf-8"), body)
+                self.assertIn("Mở trang lịch học trên QLDT, nhấn Ctrl + S để lưu trang".encode("utf-8"), body)
+                self.assertNotIn("Tải file lịch trực tiếp".encode("utf-8"), body)
+                status, headers, _body = self._request(server, "GET", "/dashboard")
+                self.assertEqual(status, 303)
+                self.assertEqual(headers["Location"], "/auth/login")
+                status, _headers, body = self._request(server, "GET", "/about")
+                self.assertEqual(status, 200)
+                self.assertIn(b"Quick export", body)
+                app_cookie = self._app_cookie(signed_sessions)
+                status, _headers, body = self._request(
+                    server, "GET", "/dashboard", headers={"Cookie": f"phenikaa_server_session={app_cookie}"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn(b"Calendar sessions", body)
+                self.assertNotIn(b'name="bootstrap_file"', body)
             finally:
                 self._stop_app(database, server, thread)
 
@@ -242,10 +264,44 @@ class WebSmokeTests(unittest.TestCase):
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
             try:
                 status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
-                self.assertEqual(status, 401)
+                self.assertEqual(status, 403)
                 headers["Cookie"] = f"phenikaa_server_session={self._app_cookie(signed_sessions)}"
                 status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
                 self.assertEqual(status, 403)
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_public_export_accepts_signed_public_csrf(self):
+        captured = []
+
+        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
+            captured.append(session)
+            root = Path(output_dir)
+            paths = {}
+            for extension in ("json", "xlsx", "ics"):
+                path = root / f"{prefix}.{extension}"
+                path.write_bytes(b"file")
+                paths[extension] = str(path)
+            return paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", calendar_exporter=calendar_exporter
+            )
+            try:
+                csrf = signed_sessions.create({"purpose": "public_export"}, lifetime=600)
+                form = {
+                    "csrf": csrf, "range_start": "2026-08-01", "range_end": "2026-10-31",
+                    "userId": "student-id", "tokenJWT": "secret-token",
+                }
+                status, _headers, _body = self._request(
+                    server, "POST", "/export", body=urllib.parse.urlencode(form),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(captured, [{"userId": "student-id", "tokenJWT": "secret-token"}])
                 self.assertEqual(sync.requested, [])
                 self.assertEqual(database.list_sessions(), [])
             finally:
@@ -379,7 +435,7 @@ class WebSmokeTests(unittest.TestCase):
                     headers={"Cookie": f"phenikaa_google_oauth_transaction={transaction}"},
                 )
                 self.assertEqual(status, 303)
-                self.assertEqual(headers["Location"], "/")
+                self.assertEqual(headers["Location"], "/dashboard")
                 self.assertIn("phenikaa_google_oauth_transaction=;", headers["Set-Cookie"])
                 self.assertEqual(google.exchanges, [(session_id, "code-ok", SCOPE)])
                 self.assertEqual(sync.requested, [session_id])
@@ -563,7 +619,7 @@ class WebSmokeTests(unittest.TestCase):
             try:
                 user = database.get_or_create_user("local-development-user", "Local user")
                 database.create_session(user["id"], label="No Google")
-                status, _headers, body = self._request(server, "GET", "/")
+                status, _headers, body = self._request(server, "GET", "/dashboard")
                 self.assertEqual(status, 200)
                 self.assertIn(b"Google Calendar: <strong>Unavailable</strong>", body)
             finally:
@@ -582,7 +638,7 @@ class WebSmokeTests(unittest.TestCase):
                     expires_at="2026-08-30T12:00:00+00:00",
                 )
                 database.set_google_connection_error(connected, "bad <token>")
-                status, _headers, body = self._request(server, "GET", "/")
+                status, _headers, body = self._request(server, "GET", "/dashboard")
                 self.assertEqual(status, 200)
                 self.assertIn(b"Google Calendar: <strong>Connected</strong>", body)
                 self.assertIn(b"bad &lt;token&gt;", body)
@@ -597,7 +653,7 @@ class WebSmokeTests(unittest.TestCase):
             try:
                 user = database.get_or_create_user("local-development-user", "Local user")
                 unconnected = database.create_session(user["id"], label="Unconnected")
-                status, _headers, body = self._request(server, "GET", "/")
+                status, _headers, body = self._request(server, "GET", "/dashboard")
                 self.assertEqual(status, 200)
                 self.assertIn(f"/sessions/{unconnected}/google/connect".encode("utf-8"), body)
             finally:

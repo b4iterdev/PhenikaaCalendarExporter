@@ -117,6 +117,22 @@
     @apply grid items-center gap-10 border-0 bg-transparent p-0 py-12 shadow-none sm:grid-cols-[minmax(0,1.35fr)_minmax(260px,.65fr)] sm:gap-16 sm:py-20;
   }
 
+  .export-shell {
+    @apply grid items-center gap-8 border-0 bg-transparent p-0 py-8 shadow-none sm:grid-cols-[minmax(0,1.1fr)_minmax(240px,.65fr)] sm:gap-14 sm:py-12;
+  }
+
+  .export-copy {
+    @apply min-w-0;
+  }
+
+  .export-copy h1 {
+    @apply max-w-3xl text-5xl font-normal leading-[.94] tracking-[-.055em] sm:text-6xl lg:text-7xl;
+  }
+
+  .export-copy .hero-lede {
+    @apply mt-5 max-w-xl text-base leading-7 text-muted-foreground sm:text-lg;
+  }
+
   .landing-hero h1 {
     @apply max-w-4xl text-5xl font-normal leading-[.9] tracking-[-.055em] sm:text-7xl lg:text-8xl;
   }
@@ -154,7 +170,7 @@
   }
 
   .export-form {
-    @apply block;
+    @apply mt-8 block rounded-2xl border bg-card p-5 shadow-card sm:p-6;
   }
 
   .date-row {
@@ -163,6 +179,10 @@
 
   .credential-grid {
     @apply mt-5 grid items-center gap-4 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)];
+  }
+
+  .export-shell .credential-grid {
+    @apply mt-6;
   }
 
   .export-form > .button--primary {
@@ -186,7 +206,54 @@
   }
 
   .or {
-    @apply text-center italic text-muted-foreground;
+    @apply flex items-center gap-3 text-center text-[10px] font-semibold tracking-[.16em] text-muted-foreground;
+  }
+
+  .or::before, .or::after {
+    content: "";
+    @apply h-px flex-1 bg-border;
+  }
+
+  @media (min-width: 768px) {
+    .credential-grid .or {
+      @apply h-full flex-col;
+    }
+
+    .credential-grid .or::before, .credential-grid .or::after {
+      @apply h-auto w-px;
+    }
+  }
+
+  .file-dropzone {
+    @apply relative flex min-h-32 cursor-pointer items-center justify-center gap-3 rounded-xl border-2 border-dashed border-border bg-background p-4 text-center transition-colors hover:border-accent hover:bg-accent/5;
+  }
+
+  .file-dropzone svg {
+    @apply h-7 w-7 shrink-0 text-accent;
+  }
+
+  .file-dropzone__copy {
+    @apply grid gap-1 text-left;
+  }
+
+  .file-dropzone__copy strong {
+    @apply text-sm font-semibold text-foreground;
+  }
+
+  .file-dropzone__copy small {
+    @apply truncate text-xs font-normal text-muted-foreground;
+  }
+
+  .file-dropzone input[type="file"] {
+    @apply absolute h-px w-px overflow-hidden opacity-0;
+  }
+
+  .file-dropzone:focus-within {
+    @apply border-accent ring-2 ring-accent/30;
+  }
+
+  .file-dropzone--active {
+    @apply border-accent bg-accent/10;
   }
 
   .section-rule {
@@ -376,6 +443,14 @@
 
     form label, form input, form .button {
       @apply w-full;
+    }
+
+    .export-form .file-dropzone {
+      @apply w-full;
+    }
+
+    .export-form .file-dropzone input[type="file"] {
+      @apply w-px;
     }
 
     .session-card__links .button {
