@@ -5,9 +5,10 @@ import json
 import secrets
 import shutil
 import urllib.parse
-from datetime import date
+from datetime import date, datetime
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Protocol
 
 from phenikaa_login import LoginTimeout
@@ -29,6 +30,13 @@ from server.oidc import OidcClient, SignedSessions, new_authorization_state
 APP_COOKIE = "phenikaa_server_session"
 OIDC_COOKIE = "phenikaa_oidc_transaction"
 GOOGLE_OAUTH_COOKIE = "phenikaa_google_oauth_transaction"
+LANGUAGE_COOKIE = "phenikaa_ui_language"
+STATUS_LABELS = {
+    "pending_login": "Action required",
+    "active": "Connected",
+    "needs_human": "Attention needed",
+    "disabled": "Disabled",
+}
 
 
 class GoogleCalendarWebService(Protocol):
@@ -91,6 +99,9 @@ class ServerApplication:
         if path == "/healthz":
             self._json(handler, 200, {"ok": True})
             return
+        if path == "/static/styles.css":
+            self._stylesheet(handler)
+            return
         if path == "/favicon.ico":
             self._empty(handler, 204)
             return
@@ -114,8 +125,21 @@ class ServerApplication:
             self._redirect(handler, "/auth/login")
             return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
+        if path == "/language":
+            language = (urllib.parse.parse_qs(parsed.query).get("lang") or [""])[0]
+            if language not in ("en", "vi"):
+                self._error(handler, 400, "unsupported language")
+                return
+            target = (urllib.parse.parse_qs(parsed.query).get("return") or ["/"])[0]
+            if target not in ("/", "/settings"):
+                target = "/"
+            self._redirect_language(handler, target, language)
+            return
         if path == "/":
             self._dashboard(handler, user, identity)
+            return
+        if path == "/settings":
+            self._settings(handler, user, identity)
             return
         parts = [part for part in path.split("/") if part]
         if len(parts) >= 2 and parts[0] == "sessions":
@@ -151,6 +175,27 @@ class ServerApplication:
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
         path = urllib.parse.urlsplit(handler.path).path
         if path == "/auth/logout":
+            self._redirect(handler, "/", clear_cookie=True)
+            return
+        if path == "/account/delete":
+            if str(form.get("confirmation") or "") != "DELETE":
+                self._error(handler, 400, "type DELETE to confirm account deletion")
+                return
+            for session in self.database.list_sessions(int(user["id"])):
+                session_id = str(session["id"])
+                lock = self.broker.try_profile_lock(session_id)
+                if lock is None:
+                    self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                    return
+                try:
+                    if self.google is not None and self.database.get_google_connection(session_id) is not None:
+                        self.google.disconnect(session_id)
+                    self.broker.delete_profile(session_id)
+                    shutil.rmtree(self.config.exports_dir / session_id, ignore_errors=True)
+                    self.broker.forget_attempt(session_id)
+                finally:
+                    lock.release()
+            self.database.delete_user(int(user["id"]))
             self._redirect(handler, "/", clear_cookie=True)
             return
         if path == "/sessions":
@@ -360,37 +405,86 @@ class ServerApplication:
 
     def _dashboard(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         csrf = html.escape(str(identity["csrf"]))
+        language = self._language(handler)
         rows = []
+        summary = []
         for session in self.database.list_sessions(int(user["id"])):
             sid = html.escape(str(session["id"]))
             label = html.escape(str(session["label"]))
             status = html.escape(str(session["status"]))
+            status_label = html.escape(STATUS_LABELS.get(str(session["status"]), "Unknown"))
             error = html.escape(str(session.get("last_sync_error") or ""))
             google = self._google_status_markup(str(session["id"]), csrf)
+            is_active = str(session["status"]) == "active"
+            export_dir = self.config.exports_dir / str(session["id"])
+            has_exports = is_active and (export_dir / "calendar.ics").is_file() and (export_dir / "calendar.json").is_file()
+            downloads = "" if not has_exports else f"""
+            <div class="session-section"><h3>Exports</h3><div class="action-row"><a class="button button--quiet" href="/sessions/{sid}/download/calendar.ics">Download ICS</a><a class="button button--quiet" href="/sessions/{sid}/download/calendar.json">Download JSON</a></div></div>"""
+            sync_action = "" if not is_active else f"""<form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--primary">Sync calendar</button></form>"""
+            last_sync = html.escape(self._friendly_timestamp(session.get("last_sync_at")))
+            summary.append(f"<div class=\"summary-item\"><span>{label}</span><strong>{status_label}</strong><small>{last_sync}</small></div>")
             rows.append(f"""
-            <article><h2>{label}</h2><p>Status: <strong>{status}</strong></p>
-            <p>{error}</p><p><a href="/sessions/{sid}/login">Open sign-in</a> ·
-            <a href="/sessions/{sid}/download/calendar.ics">ICS</a> ·
-            <a href="/sessions/{sid}/download/calendar.json">JSON</a></p>
-            {google}
-            <form method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
-            <label>From <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label>
-            <label>To <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label>
-            <button>Save range</button></form>
-            <form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button>Sync now</button></form>
-            <form method="post" action="/sessions/{sid}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="danger">Delete</button></form></article>""")
+            <article class="session-card"><div class="session-card__head"><div><p class="eyebrow">Phenikaa account</p><h2>{label}</h2></div><span class="status status--{status}">{status_label}</span></div>
+            <p class="session-card__error">{error}</p><div class="session-section session-section--connection"><h3>Connection</h3><div class="action-row"><a class="button button--primary" href="/sessions/{sid}/login">{'Reconnect account' if is_active else 'Sign in to connect'}</a>{sync_action}</div></div>
+            <div class="session-section"><h3>Calendar range</h3><form class="range-form" method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
+            <div class="field-group"><label>Range start <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label><label>Range end <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label></div>
+            <button class="button button--primary">Save date range</button></form></div>
+            {downloads}<div class="session-section"><h3>Google Calendar</h3><div class="integration">{google}</div></div></article>""")
         start, end = academic_year_range()
         new_session_form = "" if rows else f"""
-        <section><h2>New session</h2><form method="post" action="/sessions">
+        <section class="setup-card"><p class="eyebrow">FIRST CONNECTION</p><h2>New session: connect a Phenikaa account</h2><p>Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.</p><form method="post" action="/sessions">
         <input type="hidden" name="csrf" value="{csrf}"><label>Name <input name="label" value="Phenikaa account"></label>
         <label>From <input type="date" name="range_start" value="{start.isoformat()}"></label>
-        <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button>Create and sign in</button></form></section>
+        <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button class="button button--primary">Create and sign in</button></form></section>
         """
+        summary_markup = f"<section class=\"summary-grid\">{''.join(summary)}</section>" if summary else ""
         body = f"""
-        <header><h1>Phenikaa Calendar Server</h1><p>{html.escape(str(user['display_name']))}</p></header>
-        <main>{new_session_form}
-        {''.join(rows) or '<p>No sessions yet.</p>'}</main>"""
+        {self._navigation(user, identity, "dashboard", language)}
+        <main><div class="section-heading"><div><p class="eyebrow">Calendar sessions</p><h2>Your calendar sessions</h2><p class="page-description">Connect, configure, and export your academic calendar from one place.</p></div></div>{summary_markup}{new_session_form}
+        {''.join(rows) or '<section class="empty-state"><p class="eyebrow">NO ACTIVE SOURCE</p><h2>Your workspace is ready.</h2><p>Connect your Phenikaa account above to begin observing and exporting your academic calendar.</p></section>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
+
+    def _settings(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
+        language = self._language(handler)
+        csrf = html.escape(str(identity["csrf"]))
+        delete_title = "Xóa tài khoản" if language == "vi" else "Delete account"
+        delete_copy = (
+            "Xóa phiên Phenikaa, dữ liệu xuất và kết nối Google của bạn. Hành động này không thể hoàn tác."
+            if language == "vi"
+            else "Delete your Phenikaa session, exports, and Google connections. This cannot be undone."
+        )
+        session_settings = "".join(
+            f"""<div class="managed-session"><div><strong>{html.escape(str(session["label"]))}</strong><p>{html.escape(STATUS_LABELS.get(str(session["status"]), "Unknown"))}</p></div><form method="post" action="/sessions/{html.escape(str(session["id"]))}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">Delete session</button></form></div>"""
+            for session in self.database.list_sessions(int(user["id"]))
+        )
+        session_management = f"<section class=\"settings-card\"><p class=\"eyebrow\">SESSION MANAGEMENT</p><h2>Phenikaa sessions</h2>{session_settings or '<p class=\"text-muted\">No sessions connected.</p>'}</section>"
+        body = f"""
+        {self._navigation(user, identity, "settings", language)}
+        <main><div class="section-heading"><div><p class="eyebrow">PREFERENCES</p><h2>{'Cài đặt' if language == 'vi' else 'Settings'}</h2></div><span class="section-rule"></span></div>
+        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">DANGER ZONE</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}"><label>{'Nhập DELETE để xác nhận' if language == 'vi' else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
+        self._html(handler, 200, self._layout("Settings", body), no_store=True)
+
+    def _navigation(self, user: dict[str, Any], identity: dict[str, Any], active: str, language: str) -> str:
+        csrf = html.escape(str(identity["csrf"]))
+        dashboard_label = "Bảng điều khiển" if language == "vi" else "Dashboard"
+        settings_label = "Cài đặt" if language == "vi" else "Settings"
+        sign_out = "Đăng xuất" if language == "vi" else "Sign out"
+        active_dashboard = " nav-link--active" if active == "dashboard" else ""
+        active_settings = " nav-link--active" if active == "settings" else ""
+        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_dashboard}" href="/">{dashboard_label}</a><a class="nav-link{active_settings}" href="/settings">{settings_label}</a></nav><div class="header-meta"><div class="language-toggle"><a class="language-option{' language-option--active' if language == 'vi' else ''}" href="/language?lang=vi&return=%2F{('settings' if active == 'settings' else '')}">VI</a><a class="language-option{' language-option--active' if language == 'en' else ''}" href="/language?lang=en&return=%2F{('settings' if active == 'settings' else '')}">EN</a></div><span>{html.escape(str(user['display_name']))}</span><form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="{csrf}"><button class="text-button">{sign_out}</button></form></div></header>"""
+
+    def _language(self, handler: BaseHTTPRequestHandler) -> str:
+        return "vi" if self._cookie(handler, LANGUAGE_COOKIE) == "vi" else "en"
+
+    def _friendly_timestamp(self, value: object) -> str:
+        if not value:
+            return "Last synced: Not yet"
+        try:
+            timestamp = datetime.fromisoformat(str(value))
+        except ValueError:
+            return "Last synced: Unknown"
+        formatted = timestamp.strftime("%b %d, %Y at %I:%M %p").replace(" 0", " ")
+        return "Last synced: " + formatted
 
     def _google_status_markup(self, session_id: str, csrf: str) -> str:
         sid = html.escape(session_id)
@@ -402,7 +496,7 @@ class ServerApplication:
         last_error = html.escape(str(connection.get("last_error") or ""))
         error = f"<p>{last_error}</p>" if last_error else ""
         return f"""<p>Google Calendar: <strong>Connected</strong></p>{error}
-            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="danger">Disconnect Google</button></form>"""
+            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">Disconnect Google</button></form>"""
 
     def _login_page(self, handler: BaseHTTPRequestHandler, session: dict[str, Any], identity: dict[str, Any]) -> None:
         sid = str(session["id"])
@@ -532,19 +626,43 @@ class ServerApplication:
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
+    def _redirect_language(self, handler: BaseHTTPRequestHandler, location: str, language: str) -> None:
+        handler.send_response(303)
+        handler.send_header("Location", location)
+        handler.send_header("Set-Cookie", f"{LANGUAGE_COOKIE}={language}; Path=/; Max-Age=31536000; SameSite=Lax")
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+
     def _send_clear_cookie(self, handler: BaseHTTPRequestHandler, clear_cookie: str | None) -> None:
         if clear_cookie:
             handler.send_header("Set-Cookie", f"{clear_cookie}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
 
     def _layout(self, title: str, body: str) -> str:
+        return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><link rel="stylesheet" href="/static/styles.css"></head><body>{body}</body></html>"""
+
+    def _legacy_layout(self, title: str, body: str) -> str:
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-        :root{{color-scheme:light;background:#f4f0e8;color:#17202a;font:16px/1.5 Georgia,serif}}body{{margin:0}}header,main,footer{{max-width:1100px;margin:auto;padding:24px}}header{{border-bottom:3px solid #9c2f24}}article,section{{background:#fff;padding:20px;margin:18px 0;border:1px solid #d4cbbd;box-shadow:4px 4px 0 #d9cdbb}}form{{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:4px}}input,button{{font:inherit;padding:8px;border:1px solid #776d61}}button{{background:#17365d;color:white;cursor:pointer}}button.danger{{background:#9c2f24}}a{{color:#17365d}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}code{{overflow-wrap:anywhere}}footer{{font-size:.95rem;border-top:1px solid #d4cbbd}}footer a{{margin-right:12px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}</style></head><body>{body}<footer><a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Service</a></footer></body></html>"""
+        :root{{color-scheme:light;background:aliceblue;color:navy;font:16px/1.5 Arial,sans-serif}}*{{box-sizing:border-box}}body{{margin:0;background:aliceblue}}header,main,footer{{max-width:1180px;margin:auto;padding:24px}}.site-header{{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid lightsteelblue;padding-top:20px;padding-bottom:20px}}.brand{{display:flex;align-items:center;gap:10px;color:navy;text-decoration:none;font-size:12px;letter-spacing:.12em;font-weight:700}}.brand b{{font-weight:400}}.brand-mark{{display:grid;place-items:center;width:30px;height:30px;background:navy;color:white;font-family:Georgia,serif;font-size:18px}}.header-meta{{display:flex;align-items:center;gap:18px;color:slategray;font-size:13px}}.text-button{{border:0;background:transparent;color:navy;padding:0;cursor:pointer;font-size:13px}}.hero{{display:flex;justify-content:center;padding:clamp(50px,9vw,105px) 0 90px;border-bottom:1px solid lightsteelblue}}.eyebrow{{margin:0 0 14px;color:royalblue;font-size:11px;font-weight:700;letter-spacing:.16em}}h1,h2,p{{margin-top:0}}h1{{margin-bottom:24px;color:navy;font-family:Georgia,serif;font-size:clamp(44px,7vw,84px);font-weight:400;line-height:.98;letter-spacing:-.055em}}h1 em{{color:royalblue;font-style:normal}}.hero__lede{{max-width:530px;color:slategray;font-size:18px;line-height:1.6}}.hero__formats{{display:flex;align-items:center;gap:12px;margin-top:34px;color:slategray;font-size:10px;letter-spacing:.14em}}.hero__formats b{{padding:8px 10px;border:1px solid lightsteelblue;background:white;color:navy;font-family:monospace;font-size:12px;letter-spacing:0}}.hero__instrument{{width:100%;max-width:700px;padding:18px;background:navy;color:white;border:1px solid navy;box-shadow:14px 14px 0 lightsteelblue}}.instrument__top,.instrument__readout{{display:flex;justify-content:space-between;gap:12px;font-family:monospace;font-size:10px;letter-spacing:.08em}}.live-dot{{color:lightskyblue}}.instrument__grid{{display:grid;grid-template-columns:38px 1fr;gap:12px;margin:34px 0 24px}}.instrument__axis{{display:flex;flex-direction:column;justify-content:space-between;color:lightskyblue;font:10px/1 monospace}}.instrument__rows{{display:grid;grid-template-columns:repeat(5,1fr);grid-template-rows:repeat(6,26px);gap:5px;background:royalblue;padding:5px}}.instrument__rows i{{display:block;background:white;opacity:.92}}.instrument__rows i:nth-child(2),.instrument__rows i:nth-child(8),.instrument__rows i:nth-child(14){{grid-column:span 2;background:lightskyblue}}.instrument__rows i:nth-child(4),.instrument__rows i:nth-child(10){{background:cornflowerblue}}.instrument__readout{{border-top:1px solid royalblue;padding-top:14px}}.instrument__readout div{{display:grid;gap:5px}}.instrument__readout small{{color:lightskyblue;font-size:9px}}.instrument__readout strong{{font-size:11px}}.section-heading{{display:flex;align-items:end;gap:24px;padding:65px 0 8px}}h2{{color:navy;font-family:Georgia,serif;font-size:32px;font-weight:400;letter-spacing:-.03em}}.section-rule{{height:1px;flex:1;margin-bottom:12px;background:lightsteelblue}}article,section{{background:white;padding:28px;margin:18px 0;border:1px solid lightsteelblue;box-shadow:0 8px 24px rgba(0,0,128,.05)}}.setup-card{{max-width:920px}}.setup-card p:not(.eyebrow),.empty-state p:not(.eyebrow){{max-width:620px;color:slategray}}form{{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:18px 0}}label{{display:grid;gap:6px;color:slategray;font-size:12px;font-weight:700}}input,button{{font:inherit;padding:10px 12px;border:1px solid lightsteelblue}}input{{background:white;color:navy}}.button{{display:inline-block;text-decoration:none;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.02em}}.button--primary{{background:navy;color:white;border-color:navy}}.button--secondary{{background:royalblue;color:white;border-color:royalblue}}.button--quiet{{background:white;color:navy}}.button--danger{{background:white;color:firebrick;border-color:rosybrown}}.session-card__head,.session-card__links,.session-card__footer{{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}}.session-card__head h2{{margin-bottom:0}}.status{{padding:6px 9px;background:aliceblue;color:royalblue;font:11px monospace;letter-spacing:.08em}}.status--needs_human{{color:firebrick;background:mistyrose}}.session-card__error{{min-height:1.5em;color:firebrick}}.session-card__links{{justify-content:flex-start;margin:22px 0}}.integration{{padding:15px 0;border-top:1px solid lightsteelblue;border-bottom:1px solid lightsteelblue}}.integration p{{margin:0;color:slategray;font-size:13px}}.integration a{{color:royalblue}}.range-form{{margin-bottom:8px}}.session-card__footer{{justify-content:flex-start;margin-top:10px}}.empty-state{{border-style:dashed}}.empty-state h2{{margin-bottom:8px}}a{{color:royalblue}}code{{overflow-wrap:anywhere}}footer{{font-size:.9rem;border-top:1px solid lightsteelblue;color:slategray}}footer a{{margin-right:16px}}img{{display:block;width:100%;background:black;outline:none;min-height:160px}}@media(max-width:760px){{header,main,footer{{padding-left:18px;padding-right:18px}}.site-header{{align-items:flex-start}}.header-meta{{align-items:flex-end;flex-direction:column;gap:5px}}.hero{{padding-top:55px;padding-bottom:60px}}.hero__instrument{{box-shadow:8px 8px 0 lightsteelblue}}.hero__formats{{align-items:flex-start;flex-wrap:wrap}}.hero__formats span{{width:100%}}.section-heading{{padding-top:45px}}.section-rule{{display:none}}form label,form input,form .button{{width:100%}}.session-card__links .button{{width:100%;text-align:center}}.range-form{{display:grid}}}}
+         </style><style>:root{{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}}body{{font-family:inherit;letter-spacing:-.01em}}h1,h2{{font-family:inherit;font-weight:700;letter-spacing:-.04em}}code,.instrument__top,.instrument__readout,.instrument__axis,.status,.eyebrow,.hero__formats,.brand{{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}}article,section{{border-radius:16px;box-shadow:0 12px 30px rgba(0,0,128,.06)}}.site-header{{border-radius:0 0 16px 16px}}.brand-mark{{border-radius:9px}}input,button,.button{{border-radius:10px}}.button--primary,.button--secondary{{box-shadow:0 4px 10px rgba(0,0,128,.12)}}.status{{border-radius:999px}}.setup-card,.session-card,.empty-state{{padding:32px}}footer{{display:none}}</style></head><body>{body}</body></html>"""
+
+    def _stylesheet(self, handler: BaseHTTPRequestHandler) -> None:
+        path = Path(__file__).with_name("static") / "styles.css"
+        if not path.is_file():
+            self._error(handler, 404, "stylesheet not available")
+            return
+        body = path.read_bytes()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/css; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
 
     def _html(self, handler: BaseHTTPRequestHandler, status: int, text: str, *, no_store: bool = False) -> None:
         body = text.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
-        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         if no_store:
             handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(body)))

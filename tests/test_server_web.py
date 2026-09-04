@@ -104,9 +104,13 @@ class WebSmokeTests(unittest.TestCase):
                     self.assertIn(title, body)
                     self.assertIn(phrase, body)
                     self.assertIn(b"Ops &lt;privacy@example.edu&gt;", body)
-                    self.assertIn(b"code{overflow-wrap:anywhere}", body)
-                    self.assertIn(b'href="/privacy"', body)
-                    self.assertIn(b'href="/terms"', body)
+                    self.assertIn(b'href="/static/styles.css"', body)
+                    self.assertNotIn(b'href="/privacy"', body)
+                    self.assertNotIn(b'href="/terms"', body)
+                status, headers, body = self._request(server, "GET", "/static/styles.css")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
+                self.assertIn(b"font-family", body)
             finally:
                 self._stop_app(database, server, thread)
 
@@ -201,6 +205,43 @@ class WebSmokeTests(unittest.TestCase):
                 thread.join()
                 server.server_close()
                 database.close()
+
+    def test_settings_language_toggle_and_account_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                status, _headers, body = self._request(server, "GET", "/settings")
+                self.assertEqual(status, 200)
+                self.assertIn(b"Dashboard", body)
+                self.assertIn(b"Delete account", body)
+                status, headers, _body = self._request(server, "GET", "/language?lang=vi&return=%2Fsettings")
+                self.assertEqual(status, 303)
+                self.assertIn("phenikaa_ui_language=vi", headers["Set-Cookie"])
+                status, _headers, body = self._request(
+                    server,
+                    "GET",
+                    "/settings",
+                    headers={"Cookie": "phenikaa_ui_language=vi"},
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("Cài đặt".encode("utf-8"), body)
+                delete_body = urllib.parse.urlencode({"csrf": "development", "confirmation": "DELETE"})
+                status, headers, _body = self._request(
+                    server,
+                    "POST",
+                    "/account/delete",
+                    body=delete_body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                self.assertEqual(status, 303)
+                self.assertEqual(headers["Location"], "/")
+                self.assertIsNone(database.get_user(user["id"]))
+                self.assertEqual(database.list_sessions(), [])
+                self.assertFalse((database.path if hasattr(database, "path") else Path(directory) / "profiles" / session_id).exists())
+            finally:
+                self._stop_app(database, server, thread)
 
     def test_google_connect_redirect_sets_signed_transaction_for_owned_session(self):
         with tempfile.TemporaryDirectory() as directory:

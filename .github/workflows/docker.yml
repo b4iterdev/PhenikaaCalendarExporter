@@ -3,10 +3,10 @@ name: Build server image
 on:
   push:
     branches: [main, "dev/**"]
-    paths: ["server/**", "phenikaa_exporter.py", "phenikaa_login.py", "pyproject.toml", "Dockerfile", ".dockerignore", ".github/workflows/docker.yml"]
+    paths: ["server/**", "frontend/**", "phenikaa_exporter.py", "phenikaa_login.py", "pyproject.toml", "package.json", "package-lock.json", "tailwind.config.js", "Dockerfile", ".dockerignore", ".github/workflows/docker.yml"]
   pull_request:
     branches: [main, "dev/**"]
-    paths: ["server/**", "phenikaa_exporter.py", "phenikaa_login.py", "pyproject.toml", "Dockerfile", ".dockerignore", ".github/workflows/docker.yml"]
+    paths: ["server/**", "frontend/**", "phenikaa_exporter.py", "phenikaa_login.py", "pyproject.toml", "package.json", "package-lock.json", "tailwind.config.js", "Dockerfile", ".dockerignore", ".github/workflows/docker.yml"]
   workflow_dispatch:
 
 concurrency:
@@ -25,8 +25,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Install dependencies
         run: |
+          npm ci
+          npm run build
           python -m pip install --upgrade pip
           python -m pip install -e ".[server]"
       - name: Run tests
