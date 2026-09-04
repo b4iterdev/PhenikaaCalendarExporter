@@ -211,7 +211,14 @@ class ServerApplication:
         except (UnicodeError, ValueError):
             self._error(handler, 400, "invalid form submission")
             return
-        csrf_valid = self._public_csrf_valid(handler, form) if identity is None else self._csrf_valid(handler, identity, form)
+        if path == "/export":
+            # The export form is public even when a logged-in user visits it.
+            # Accept its signed form token as well as the authenticated session token.
+            csrf_valid = self._public_csrf_valid(handler, form) or (
+                identity is not None and self._csrf_valid(handler, identity, form)
+            )
+        else:
+            csrf_valid = self._csrf_valid(handler, identity, form) if identity is not None else False
         if not csrf_valid:
             self._error(handler, 403, "invalid CSRF token")
             return

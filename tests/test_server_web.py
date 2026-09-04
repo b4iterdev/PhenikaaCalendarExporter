@@ -307,6 +307,58 @@ class WebSmokeTests(unittest.TestCase):
             finally:
                 self._stop_app(database, server, thread)
 
+    def test_public_export_file_accepts_public_csrf_when_authenticated(self):
+        captured = []
+
+        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
+            captured.append(session)
+            root = Path(output_dir)
+            paths = {}
+            for extension in ("json", "xlsx", "ics"):
+                path = root / f"{prefix}.{extension}"
+                path.write_bytes(b"file")
+                paths[extension] = str(path)
+            return paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", calendar_exporter=calendar_exporter
+            )
+            try:
+                csrf = signed_sessions.create({"purpose": "public_export"}, lifetime=600)
+                blob = pe.xor_b64_encode(
+                    json.dumps({"userId": "student-id", "tokenJWT": "secret-token"}), pe.BOOTSTRAP_KEY
+                )
+                boundary = "----TestBoundary"
+                fields = [
+                    ("csrf", csrf, None),
+                    ("range_start", "2026-08-01", None),
+                    ("range_end", "2026-10-31", None),
+                    ("bootstrap_file", f'<script>AXYZCLRVN = () => "{blob}"</script>', "index.html"),
+                ]
+                parts = []
+                for name, value, filename in fields:
+                    disposition = f'form-data; name="{name}"'
+                    if filename:
+                        disposition += f'; filename="{filename}"'
+                    parts.append(
+                        f"--{boundary}\r\nContent-Disposition: {disposition}\r\n\r\n{value}\r\n".encode()
+                    )
+                body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+                headers = {
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(len(body)),
+                    "Cookie": f"phenikaa_server_session={self._app_cookie(signed_sessions)}",
+                }
+                status, _response_headers, _body = self._request(
+                    server, "POST", "/export", body=body, headers=headers
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(captured, [{"userId": "student-id", "tokenJWT": "secret-token"}])
+                self.assertEqual(sync.requested, [])
+            finally:
+                self._stop_app(database, server, thread)
+
     def test_export_supports_manual_credentials_without_sync(self):
         captured = []
 
