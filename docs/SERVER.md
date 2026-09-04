@@ -4,6 +4,8 @@
 
 Server mode keeps one Phenikaa account session per OIDC-authenticated user, encrypts captured JWTs in SQLite, refreshes tokens through the retained portal cookies, and writes that session's JSON and ICS exports.
 
+The public home page introduces the service and links to the configured OIDC login. After login, the dashboard also offers a one-shot export that does not create a Phenikaa server session or use Google Calendar.
+
 ## Configuration
 
 ```bash
@@ -33,12 +35,12 @@ ${PHENIKAA_SERVER_BASE_URL}/terms
 
 ## One-shot web export
 
-The public home page links to OIDC login. After authentication, the dashboard offers **Download without syncing**, which accepts exactly one Phenikaa authentication source:
+The public home page provides **Public export** without requiring an account. After authentication, the dashboard provides the retained-session management tools and can also offer **Download without syncing**, which accepts exactly one Phenikaa authentication source:
 
 - Paste a saved authenticated `index.aspx` response containing `AXYZCLRVN`.
 - Enter both the portal `userId` and raw `tokenJWT` manually.
 
-Submitted credentials remain in process memory only for that request. The server does not add them to SQLite, retain the HTML, create a browser profile, start background synchronization, or contact Google. The response is `phenikaa-calendar-export.zip`, containing `calendar.json`, `calendar.xlsx`, and `calendar.ics`. The form body is limited to 1 MiB.
+Here, “bootstrap HTML” means the authenticated portal response, not the Bootstrap CSS framework. Submitted credentials remain in process memory only for that request; the server does not add them to SQLite, retain the HTML, create a browser profile, request a background sync, or contact Google. The request uses the signed public export token or the normal application CSRF token as appropriate. The response is `phenikaa-calendar-export.zip` containing `calendar.json`, `calendar.xlsx`, and `calendar.ics`, with `Cache-Control: no-store`. The form body is limited to 1 MiB.
 
 Saved HTML and JWTs are bearer credentials. Do not share them, and delete saved HTML after export.
 
