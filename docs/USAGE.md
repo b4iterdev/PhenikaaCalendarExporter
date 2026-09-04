@@ -66,3 +66,9 @@ exports/current_semester.ics
 ```
 
 The JSON is normalized source data. XLSX includes Date, weekday, start/end time, class or exam type, course, section, room or online location, lecturer, periods, session, attendance status, event ID, and a Summary sheet. ICS contains one timezone-aware `VEVENT` per record using `Asia/Ho_Chi_Minh`; exams are categorized and prefixed with `Exam:`. UTF-8 lines are folded to RFC 5545’s 75-octet limit.
+
+## Web export without syncing
+
+In server mode, open the public home page and select **Login**. Once authenticated, use **Download without syncing** on the dashboard. Supply either a saved authenticated `index.aspx` response or both `userId` and `tokenJWT`, then choose the inclusive date range.
+
+The browser downloads `phenikaa-calendar-export.zip` with `calendar.json`, `calendar.xlsx`, and `calendar.ics`. This one-shot path does not create a retained Phenikaa session, start background synchronization, or connect to Google Calendar.

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import html
+import io
 import json
 import secrets
 import shutil
+import tempfile
 import urllib.parse
+import zipfile
 from datetime import date
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Protocol
 
+from phenikaa_exporter import export_calendar_files, parse_bootstrap_html
 from phenikaa_login import LoginTimeout
 
 from server.config import ServerConfig, academic_year_range
@@ -29,6 +34,7 @@ from server.oidc import OidcClient, SignedSessions, new_authorization_state
 APP_COOKIE = "phenikaa_server_session"
 OIDC_COOKIE = "phenikaa_oidc_transaction"
 GOOGLE_OAUTH_COOKIE = "phenikaa_google_oauth_transaction"
+MAX_EXPORT_FORM_BYTES = 1024 * 1024
 
 
 class GoogleCalendarWebService(Protocol):
@@ -47,6 +53,19 @@ class SyncRequester(Protocol):
         pass
 
 
+class CalendarExporter(Protocol):
+    def __call__(
+        self,
+        session: dict[str, Any],
+        start: date,
+        end: date,
+        output_dir: Path | str,
+        prefix: str,
+        calendar_name: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+
 class ServerApplication:
     def __init__(
         self,
@@ -58,6 +77,7 @@ class ServerApplication:
         sync_engine: SyncRequester,
         oidc: OidcClient | None,
         google: GoogleCalendarWebService | None = None,
+        calendar_exporter: CalendarExporter = export_calendar_files,
     ) -> None:
         self.config = config
         self.database = database
@@ -67,6 +87,7 @@ class ServerApplication:
         self.sync_engine = sync_engine
         self.oidc = oidc
         self.google = google
+        self.calendar_exporter = calendar_exporter
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         application = self
@@ -110,6 +131,9 @@ class ServerApplication:
             self._finish_google_oauth(handler, urllib.parse.parse_qs(parsed.query))
             return
         identity = self._identity(handler)
+        if path == "/" and identity is None:
+            self._landing(handler)
+            return
         if identity is None:
             self._redirect(handler, "/auth/login")
             return
@@ -140,16 +164,26 @@ class ServerApplication:
         self._error(handler, 404, "not found")
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
+        path = urllib.parse.urlsplit(handler.path).path
         identity = self._identity(handler)
         if identity is None:
             self._error(handler, 401, "authentication required")
             return
-        form = self._read_form(handler)
+        try:
+            form = self._read_export_form(handler) if path == "/export" else self._read_form(handler)
+        except OverflowError:
+            self._error(handler, 413, "export form is too large")
+            return
+        except (UnicodeError, ValueError):
+            self._error(handler, 400, "invalid form submission")
+            return
         if not self._csrf_valid(handler, identity, form):
             self._error(handler, 403, "invalid CSRF token")
             return
+        if path == "/export":
+            self._export(handler, form)
+            return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
-        path = urllib.parse.urlsplit(handler.path).path
         if path == "/auth/logout":
             self._redirect(handler, "/", clear_cookie=True)
             return
@@ -358,6 +392,21 @@ class ServerApplication:
         self.sync_engine.request_sync(str(session["id"]))
         self._redirect(handler, "/", clear_cookie=clear_google_cookie)
 
+    def _landing(self, handler: BaseHTTPRequestHandler) -> None:
+        body = """
+        <header class="site-header"><a class="wordmark" href="/">Phenikaa / Calendar</a><a class="button button-small" href="/auth/login">Login</a></header>
+        <main class="landing">
+        <section class="hero"><div><p class="eyebrow">Your semester, made portable</p><h1>Carry your timetable beyond the portal.</h1>
+        <p class="lede">Turn Phenikaa classes and exams into calendar files you control. Export once for Apple Calendar, Google Calendar, Outlook, or a spreadsheet. Syncing is entirely optional.</p>
+        <p><a class="button" href="/auth/login">Login to export <span aria-hidden="true">→</span></a></p></div>
+        <div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section>
+        <section class="feature-grid" aria-label="How it works">
+        <article><span class="step">01</span><h2>Use your session</h2><p>Bring a saved authenticated page or provide your current portal token manually. Your password is never requested.</p></article>
+        <article><span class="step">02</span><h2>Choose your range</h2><p>Select the dates you need, from a single week to the full academic year.</p></article>
+        <article><span class="step">03</span><h2>Keep the files</h2><p>Download ICS, XLSX, and JSON together. The one-shot export does not connect to Google or start synchronization.</p></article>
+        </section></main>"""
+        self._html(handler, 200, self._layout("Phenikaa Calendar Exporter", body), no_store=True)
+
     def _dashboard(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         csrf = html.escape(str(identity["csrf"]))
         rows = []
@@ -386,11 +435,68 @@ class ServerApplication:
         <label>From <input type="date" name="range_start" value="{start.isoformat()}"></label>
         <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button>Create and sign in</button></form></section>
         """
+        export_form = f"""<section class="export-panel"><div class="section-heading"><div><p class="eyebrow">One-shot export</p><h2>Download without syncing</h2></div><p>Credentials stay in memory for this request and are not added to a server session.</p></div>
+        <form class="export-form" method="post" action="/export"><input type="hidden" name="csrf" value="{csrf}">
+        <div class="date-row"><label>From <input required type="date" name="range_start" value="{start.isoformat()}"></label>
+        <label>To <input required type="date" name="range_end" value="{end.isoformat()}"></label></div>
+        <div class="credential-grid"><fieldset><legend>Saved authenticated page</legend><label>Authenticated index.aspx HTML<textarea name="bootstrap_html" rows="7" placeholder="Paste the saved page source containing AXYZCLRVN"></textarea></label><p class="hint">Use this by itself. The file contains a private token; delete it when finished.</p></fieldset>
+        <div class="or" aria-hidden="true">or</div><fieldset><legend>Manual session</legend><label>User ID<input name="userId" autocomplete="off"></label><label>Token JWT<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">Provide both fields and leave the saved-page field empty.</p></fieldset></div>
+        <button class="button" type="submit">Export calendar files</button></form></section>"""
         body = f"""
-        <header><h1>Phenikaa Calendar Server</h1><p>{html.escape(str(user['display_name']))}</p></header>
-        <main>{new_session_form}
+        <header class="site-header"><a class="wordmark" href="/">Phenikaa / Calendar</a><span>{html.escape(str(user['display_name']))}</span></header>
+        <main><header class="page-heading"><p class="eyebrow">Calendar workspace</p><h1>Your academic calendar</h1></header>{export_form}{new_session_form}
         {''.join(rows) or '<p>No sessions yet.</p>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
+
+    def _export(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> None:
+        try:
+            start_value, end_value = self._validated_range(
+                str(form.get("range_start") or ""), str(form.get("range_end") or "")
+            )
+        except ValueError as error:
+            self._error(handler, 400, str(error))
+            return
+        bootstrap_html = str(form.get("bootstrap_html") or "").strip()
+        user_id = str(form.get("userId") or "").strip()
+        token = str(form.get("tokenJWT") or "").strip()
+        has_html = bool(bootstrap_html)
+        has_manual = bool(user_id or token)
+        if has_html == has_manual:
+            self._error(handler, 400, "provide either saved HTML or manual credentials")
+            return
+        if has_manual and not (user_id and token):
+            self._error(handler, 400, "manual credentials require userId and tokenJWT")
+            return
+        try:
+            session = parse_bootstrap_html(bootstrap_html) if has_html else {"userId": user_id, "tokenJWT": token}
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            self._error(handler, 400, "saved HTML does not contain valid Phenikaa session data")
+            return
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                summary = self.calendar_exporter(
+                    session,
+                    date.fromisoformat(start_value),
+                    date.fromisoformat(end_value),
+                    directory,
+                    "calendar",
+                    "Phenikaa Learning Calendar",
+                )
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    for extension in ("json", "xlsx", "ics"):
+                        archive.write(str(summary[extension]), arcname=f"calendar.{extension}")
+                body = output.getvalue()
+        except Exception:
+            self._error(handler, 502, "calendar export failed; check the credentials and date range")
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/zip")
+        handler.send_header("Content-Disposition", 'attachment; filename="phenikaa-calendar-export.zip"')
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
 
     def _google_status_markup(self, session_id: str, csrf: str) -> str:
         sid = html.escape(session_id)
@@ -420,7 +526,7 @@ class ServerApplication:
 
         self.broker.start_login(sid, complete, failed)
         csrf = json.dumps(str(identity["csrf"]))
-        body = f"""<header><h1>Phenikaa sign-in</h1></header><main>
+        body = f"""<header class="site-header"><h1>Phenikaa sign-in</h1></header><main>
         <p>Sign in on the streamed portal below. Keyboard and pointer input is relayed through this server to Phenikaa and is not stored.</p>
         <img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal">
         <p id="status">Waiting for sign-in...</p></main><script>
@@ -504,6 +610,23 @@ class ServerApplication:
         values = urllib.parse.parse_qs(handler.rfile.read(length).decode("utf-8")) if length else {}
         return {key: items[0] for key, items in values.items() if items}
 
+    def _read_export_form(self, handler: BaseHTTPRequestHandler) -> dict[str, str]:
+        if "application/x-www-form-urlencoded" not in (handler.headers.get("Content-Type") or ""):
+            raise ValueError("unsupported content type")
+        try:
+            length = int(handler.headers.get("Content-Length") or 0)
+        except ValueError as error:
+            raise ValueError("invalid content length") from error
+        if length > MAX_EXPORT_FORM_BYTES:
+            raise OverflowError("export form is too large")
+        if length <= 0:
+            return {}
+        raw = handler.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("incomplete form submission")
+        values = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=False)
+        return {key: items[0] for key, items in values.items() if items}
+
     def _read_json(self, handler: BaseHTTPRequestHandler) -> Any:
         length = min(int(handler.headers.get("Content-Length") or 0), 64 * 1024)
         return json.loads(handler.rfile.read(length)) if length else None
@@ -538,7 +661,7 @@ class ServerApplication:
 
     def _layout(self, title: str, body: str) -> str:
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-        :root{{color-scheme:light;background:#f4f0e8;color:#17202a;font:16px/1.5 Georgia,serif}}body{{margin:0}}header,main,footer{{max-width:1100px;margin:auto;padding:24px}}header{{border-bottom:3px solid #9c2f24}}article,section{{background:#fff;padding:20px;margin:18px 0;border:1px solid #d4cbbd;box-shadow:4px 4px 0 #d9cdbb}}form{{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:4px}}input,button{{font:inherit;padding:8px;border:1px solid #776d61}}button{{background:#17365d;color:white;cursor:pointer}}button.danger{{background:#9c2f24}}a{{color:#17365d}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}code{{overflow-wrap:anywhere}}footer{{font-size:.95rem;border-top:1px solid #d4cbbd}}footer a{{margin-right:12px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}</style></head><body>{body}<footer><a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Service</a></footer></body></html>"""
+        :root{{color-scheme:light;background:#f4efe3;color:#17251f;font:16px/1.55 "Iowan Old Style","Palatino Linotype",Georgia,serif;--ink:#17251f;--paper:#fffdf7;--red:#a33b2f;--green:#234f40;--line:#cfc5b2}}*{{box-sizing:border-box}}body{{margin:0;background:linear-gradient(90deg,rgba(35,79,64,.045) 1px,transparent 1px),#f4efe3;background-size:32px 32px}}a{{color:var(--green)}}.site-header,main,footer{{max-width:1180px;margin:auto;padding:24px 28px}}.site-header{{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}}.wordmark{{color:var(--ink);font-weight:700;letter-spacing:.06em;text-decoration:none;text-transform:uppercase}}.button,button{{display:inline-block;border:1px solid var(--ink);background:var(--green);color:#fff;cursor:pointer;font:700 1rem/1 inherit;padding:13px 20px;text-decoration:none;box-shadow:4px 4px 0 var(--ink)}}.button:hover,button:hover{{transform:translate(1px,1px);box-shadow:3px 3px 0 var(--ink)}}.button-small{{padding:9px 16px;box-shadow:3px 3px 0 var(--ink)}}button.danger{{background:var(--red)}}.hero{{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(260px,.65fr);gap:64px;align-items:center;padding:80px 0 64px;background:transparent;border:0;box-shadow:none;margin:0}}h1{{font-size:clamp(3rem,8vw,6.8rem);font-weight:500;letter-spacing:-.055em;line-height:.88;margin:.18em 0}}h2{{font-size:1.55rem;line-height:1.1}}.lede{{font-size:1.24rem;max-width:650px}}.eyebrow,.step{{font:700 .78rem/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.15em;text-transform:uppercase;color:var(--red)}}.calendar-mark{{aspect-ratio:4/5;background:var(--red);color:#fff;display:grid;grid-template-rows:auto 1fr auto;padding:24px;transform:rotate(2deg);box-shadow:12px 12px 0 var(--green)}}.calendar-mark span,.calendar-mark small{{font:700 .82rem/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.1em}}.calendar-mark strong{{align-self:center;font-size:clamp(5rem,12vw,9rem);font-weight:400;line-height:1}}.feature-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin:24px 0 72px;border:1px solid var(--line);background:var(--paper)}}article,section{{background:var(--paper);padding:24px;margin:18px 0;border:1px solid var(--line);box-shadow:4px 4px 0 #d9cdbb}}.feature-grid article{{margin:0;border:0;border-right:1px solid var(--line);box-shadow:none}}.feature-grid article:last-child{{border-right:0}}.page-heading{{padding:36px 0 12px;border:0}}.page-heading h1{{font-size:clamp(2.8rem,7vw,5.5rem)}}form{{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:5px;font-weight:700}}input,textarea,button{{font:inherit}}input,textarea{{width:100%;padding:10px;border:1px solid #776d61;background:#fff}}textarea{{resize:vertical}}fieldset{{min-width:0;border:1px solid var(--line);padding:18px}}legend{{font-weight:700;padding:0 6px}}.export-panel{{padding:30px}}.section-heading{{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:end}}.section-heading h2{{font-size:2.3rem;margin:.2em 0}}.export-form{{display:block}}.date-row{{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:520px;margin:20px 0}}.credential-grid{{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;margin:20px 0}}.credential-grid fieldset{{height:100%}}.or{{font-style:italic;color:#695f53}}.hint{{font-size:.9rem;color:#5f5a50}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}code{{overflow-wrap:anywhere}}footer{{font-size:.95rem;border-top:1px solid var(--line)}}footer a{{margin-right:12px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}@media(max-width:760px){{.site-header,main,footer{{padding-left:18px;padding-right:18px}}.hero{{grid-template-columns:1fr;gap:38px;padding-top:48px}}.calendar-mark{{max-width:340px}}.feature-grid{{grid-template-columns:1fr}}.feature-grid article{{border-right:0;border-bottom:1px solid var(--line)}}.section-heading,.credential-grid,.date-row{{grid-template-columns:1fr}}.or{{text-align:center}}}}</style></head><body>{body}<footer><a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Service</a></footer></body></html>"""
 
     def _html(self, handler: BaseHTTPRequestHandler, status: int, text: str, *, no_store: bool = False) -> None:
         body = text.encode("utf-8")

@@ -1,10 +1,14 @@
 import http.client
+import io
+import json
 from http import cookies
 import tempfile
 import threading
 import time
 import unittest
 import urllib.parse
+import zipfile
+from datetime import date
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -13,6 +17,7 @@ if find_spec("jwt") is None or find_spec("cryptography") is None:
 
 from cryptography.fernet import Fernet
 
+import phenikaa_exporter as pe
 from server.config import ServerConfig
 from server.crypto import TokenVault
 from server.db import Database
@@ -52,7 +57,7 @@ class RecordingSync:
 
 
 class WebSmokeTests(unittest.TestCase):
-    def _start_app(self, directory, *, auth_mode="disabled", google=None, locks=None):
+    def _start_app(self, directory, *, auth_mode="disabled", google=None, locks=None, calendar_exporter=None):
         config = ServerConfig(state_dir=Path(directory), host="127.0.0.1", port=0, auth_mode=auth_mode)
         config.ensure_dirs()
         database = Database(config.db_path)
@@ -60,7 +65,8 @@ class WebSmokeTests(unittest.TestCase):
         signed_sessions = SignedSessions(b"x" * 32)
         broker = LoginBroker(config, locks=locks or ProfileLocks())
         sync = RecordingSync()
-        app = ServerApplication(config, database, vault, signed_sessions, broker, sync, None, google)
+        options = {"calendar_exporter": calendar_exporter} if calendar_exporter is not None else {}
+        app = ServerApplication(config, database, vault, signed_sessions, broker, sync, None, google, **options)
         server = make_server(app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -107,6 +113,147 @@ class WebSmokeTests(unittest.TestCase):
                     self.assertIn(b"code{overflow-wrap:anywhere}", body)
                     self.assertIn(b'href="/privacy"', body)
                     self.assertIn(b'href="/terms"', body)
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_public_home_has_login_and_authenticated_dashboard_has_export_form(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, _sync, server, thread = self._start_app(directory, auth_mode="oidc")
+            try:
+                status, headers, body = self._request(server, "GET", "/")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertIn(b'href="/auth/login"', body)
+                self.assertIn(b"Carry your timetable beyond the portal", body)
+                self.assertNotIn(b"tokenJWT", body)
+
+                app_cookie = self._app_cookie(signed_sessions)
+                status, _headers, body = self._request(
+                    server, "GET", "/", headers={"Cookie": f"phenikaa_server_session={app_cookie}"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn(b'action="/export"', body)
+                self.assertIn(b'name="bootstrap_html"', body)
+                self.assertIn(b'name="userId"', body)
+                self.assertIn(b'name="tokenJWT"', body)
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_export_requires_authentication_and_csrf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(directory, auth_mode="oidc")
+            body = urllib.parse.urlencode({"range_start": "2026-08-01", "range_end": "2026-10-31"})
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            try:
+                status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
+                self.assertEqual(status, 401)
+                app_cookie = self._app_cookie(signed_sessions)
+                headers["Cookie"] = f"phenikaa_server_session={app_cookie}"
+                status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
+                self.assertEqual(status, 403)
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_export_supports_saved_html_and_manual_credentials_without_sync(self):
+        captured = []
+
+        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
+            captured.append((session, start, end, calendar_name))
+            root = Path(output_dir)
+            paths = {}
+            for extension, content in (("json", b"[]"), ("xlsx", b"xlsx"), ("ics", b"BEGIN:VCALENDAR")):
+                path = root / f"{prefix}.{extension}"
+                path.write_bytes(content)
+                paths[extension] = str(path)
+            return paths
+
+        google = FakeGoogleService()
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", google=google, calendar_exporter=calendar_exporter
+            )
+            app_cookie = self._app_cookie(signed_sessions)
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": f"phenikaa_server_session={app_cookie}",
+            }
+            payload = {"userId": "student-id", "tokenJWT": "secret-token"}
+            blob = pe.xor_b64_encode(json.dumps(payload), pe.BOOTSTRAP_KEY)
+            saved_html = f'<script>AXYZCLRVN = () => "{blob}"</script>'
+            forms = (
+                {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31", "bootstrap_html": saved_html},
+                {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31", **payload},
+            )
+            try:
+                for form in forms:
+                    status, response_headers, body = self._request(
+                        server, "POST", "/export", body=urllib.parse.urlencode(form), headers=headers
+                    )
+                    self.assertEqual(status, 200)
+                    self.assertEqual(response_headers["Content-Type"], "application/zip")
+                    self.assertEqual(response_headers["Cache-Control"], "no-store")
+                    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                        self.assertEqual(sorted(archive.namelist()), ["calendar.ics", "calendar.json", "calendar.xlsx"])
+                        self.assertEqual(archive.read("calendar.json"), b"[]")
+                        self.assertEqual(archive.read("calendar.xlsx"), b"xlsx")
+                        self.assertEqual(archive.read("calendar.ics"), b"BEGIN:VCALENDAR")
+                self.assertEqual([item[0] for item in captured], [payload, payload])
+                self.assertEqual(captured[0][1:3], (date(2026, 8, 1), date(2026, 10, 31)))
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
+                self.assertEqual(google.states, [])
+                self.assertEqual(google.exchanges, [])
+                self.assertEqual(google.disconnects, [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_export_rejects_invalid_inputs_without_leaking_secrets(self):
+        def failing_exporter(session, start, end, output_dir, prefix, calendar_name):
+            raise RuntimeError("upstream exposed " + str(session["tokenJWT"]))
+
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", calendar_exporter=failing_exporter
+            )
+            app_cookie = self._app_cookie(signed_sessions)
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": f"phenikaa_server_session={app_cookie}",
+            }
+            base = {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31"}
+            non_object_blob = pe.xor_b64_encode("[]", pe.BOOTSTRAP_KEY)
+            invalid_forms = (
+                base,
+                {**base, "userId": "student-id"},
+                {**base, "userId": "student-id", "tokenJWT": "secret-token", "bootstrap_html": "private html"},
+                {**base, "bootstrap_html": '<script>AXYZCLRVN = () => "x"</script>'},
+                {**base, "bootstrap_html": f'<script>AXYZCLRVN = () => "{non_object_blob}"</script>'},
+                {**base, "userId": "student-id", "tokenJWT": "secret-token", "range_start": "2026-11-01"},
+            )
+            try:
+                for form in invalid_forms:
+                    status, _response_headers, body = self._request(
+                        server, "POST", "/export", body=urllib.parse.urlencode(form), headers=headers
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertNotIn(b"secret-token", body)
+                    self.assertNotIn(b"private html", body)
+                valid = {**base, "userId": "student-id", "tokenJWT": "secret-token"}
+                status, _response_headers, body = self._request(
+                    server, "POST", "/export", body=urllib.parse.urlencode(valid), headers=headers
+                )
+                self.assertEqual(status, 502)
+                self.assertNotIn(b"secret-token", body)
+                oversized_headers = dict(headers)
+                oversized_headers["Content-Length"] = str(1024 * 1024 + 1)
+                status, _response_headers, _body = self._request(
+                    server, "POST", "/export", body=b"", headers=oversized_headers
+                )
+                self.assertEqual(status, 413)
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
             finally:
                 self._stop_app(database, server, thread)
 

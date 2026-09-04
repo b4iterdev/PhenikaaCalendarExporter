@@ -55,6 +55,12 @@ python phenikaa_exporter.py --start 2026-08-01 --end 2027-01-31 --auth-json .aut
 
 `userId` can be read from `window.edu?.system?.userId` in the authenticated portal. `tokenJWT` is the value after `Bearer` in an authenticated calendar API request. Never share either value.
 
+## Server one-shot export
+
+After signing in to the calendar server through its configured OIDC provider, the dashboard can create an export without creating or syncing a retained Phenikaa session. Choose either the saved authenticated `index.aspx` HTML method or the manual `userId` plus `tokenJWT` method. Do not fill both credential sections.
+
+The server decodes or uses these values only for the current request and returns a ZIP containing JSON, XLSX, and ICS files. It does not retain the submitted HTML or credentials. “Bootstrap HTML” in this workflow refers to the portal's saved authenticated response, not the Bootstrap CSS framework.
+
 ## Security
 
 - `.auth.json` contains a bearer token and is git-ignored; never commit, paste, or screenshot it.
