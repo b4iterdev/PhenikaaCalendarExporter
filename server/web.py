@@ -542,7 +542,7 @@ class ServerApplication:
         empty_file_label = json.dumps("Chưa chọn file" if vi else "No file selected")
         text = {
              "eyebrow": "TẠO LỊCH NHANH" if vi else "QUICK EXPORT",
-            "title": "Xuất lịch học dạng .ics" if vi else "Export schedule as .ics",
+            "title": "Tạo file lịch học dạng .ics" if vi else "Export schedule as .ics",
             "description": "Dùng file HTML đã lưu hoặc token hiện tại để tải lịch học." if vi else "Use a saved authenticated HTML page or your current token to download your calendar. Credentials are processed for this export only and are not stored.",
              "saved": "File HTML" if vi else "HTML file",
              "file_prompt": "Kéo thả file HTML hoặc bấm để chọn" if vi else "Drop an HTML file here or click to choose",
