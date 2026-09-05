@@ -185,6 +185,99 @@
     @apply mt-6;
   }
 
+  .signin-shell {
+    @apply mx-auto flex min-h-[calc(100vh-5.5rem)] max-w-6xl flex-col items-center justify-center px-4 py-8 sm:px-6;
+  }
+
+  .signin-intro {
+    @apply mb-8 text-center sm:mb-10;
+  }
+
+  .signin-intro::before {
+    content: "";
+    @apply mx-auto mb-5 block h-px w-16 bg-accent;
+  }
+
+  .signin-kicker {
+    @apply mb-4 flex items-center justify-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-[.14em] text-accent;
+  }
+
+  .signin-kicker__dot, .signin-live-dot {
+    @apply inline-block h-2 w-2 rounded-full bg-accent shadow-[0_0_0_4px_hsl(var(--accent)/.12)];
+  }
+
+  .signin-intro h1 {
+    @apply mb-3 text-4xl font-normal leading-[.92] tracking-[-.06em] sm:text-6xl;
+  }
+
+  .signin-intro h1 em {
+    @apply text-accent not-italic;
+  }
+
+  .signin-lede {
+    @apply mx-auto max-w-lg text-sm leading-6 text-muted-foreground;
+  }
+
+  .signin-console {
+    @apply w-full max-w-5xl overflow-hidden border bg-foreground p-3 text-primary-foreground shadow-[12px_12px_0_hsl(var(--muted))] sm:p-4;
+  }
+
+  .signin-console__top, .signin-console__bottom {
+    @apply flex items-center justify-between gap-4 px-1 py-2 font-mono text-[10px] uppercase tracking-[.12em];
+  }
+
+  .signin-console__top {
+    @apply text-primary-foreground/80;
+  }
+
+  .signin-console__top > span:first-child {
+    @apply flex items-center gap-2;
+  }
+
+  .signin-console__lock, .signin-hint {
+    @apply text-primary-foreground/45;
+  }
+
+  .signin-live-dot {
+    @apply h-1.5 w-1.5 bg-accent shadow-none;
+  }
+
+  .signin-frame {
+    @apply relative overflow-hidden border border-primary-foreground/15 bg-black;
+  }
+
+  .signin-frame img {
+    @apply min-h-[20rem] rounded-none bg-black sm:min-h-[36rem];
+  }
+
+  .signin-frame__corner {
+    @apply pointer-events-none absolute h-5 w-5 border-accent;
+  }
+
+  .signin-frame__corner--tl {
+    @apply left-3 top-3 border-l border-t;
+  }
+
+  .signin-frame__corner--tr {
+    @apply right-3 top-3 border-r border-t;
+  }
+
+  .signin-frame__corner--bl {
+    @apply bottom-3 left-3 border-b border-l;
+  }
+
+  .signin-frame__corner--br {
+    @apply bottom-3 right-3 border-b border-r;
+  }
+
+  .signin-console__bottom {
+    @apply text-accent;
+  }
+
+  #status {
+    @apply truncate;
+  }
+
   .export-form > .button--primary {
     @apply mt-2;
   }
