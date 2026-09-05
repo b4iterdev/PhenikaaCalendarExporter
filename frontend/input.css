@@ -186,36 +186,7 @@
   }
 
   .signin-shell {
-    @apply mx-auto flex min-h-[calc(100vh-5.5rem)] max-w-6xl flex-col items-center justify-center px-4 py-8 sm:px-6;
-  }
-
-  .signin-intro {
-    @apply mb-8 text-center sm:mb-10;
-  }
-
-  .signin-intro::before {
-    content: "";
-    @apply mx-auto mb-5 block h-px w-16 bg-accent;
-  }
-
-  .signin-kicker {
-    @apply mb-4 flex items-center justify-center gap-2 font-mono text-[10px] font-semibold uppercase tracking-[.14em] text-accent;
-  }
-
-  .signin-kicker__dot, .signin-live-dot {
-    @apply inline-block h-2 w-2 rounded-full bg-accent shadow-[0_0_0_4px_hsl(var(--accent)/.12)];
-  }
-
-  .signin-intro h1 {
-    @apply mb-3 text-4xl font-normal leading-[.92] tracking-[-.06em] sm:text-6xl;
-  }
-
-  .signin-intro h1 em {
-    @apply text-accent not-italic;
-  }
-
-  .signin-lede {
-    @apply mx-auto max-w-lg text-sm leading-6 text-muted-foreground;
+    @apply mx-auto flex min-h-[calc(100vh-5.5rem)] max-w-5xl flex-col items-center justify-center px-4 py-8 sm:px-6;
   }
 
   .signin-console {
@@ -238,7 +209,7 @@
     @apply text-primary-foreground/45;
   }
 
-  .signin-live-dot {
+  .signin-kicker__dot {
     @apply h-1.5 w-1.5 bg-accent shadow-none;
   }
 
