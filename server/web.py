@@ -8,7 +8,9 @@ import shutil
 import tempfile
 import urllib.parse
 import zipfile
-from datetime import date
+from datetime import date, datetime
+from email.parser import BytesParser
+from email.policy import default
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +36,13 @@ from server.oidc import OidcClient, SignedSessions, new_authorization_state
 APP_COOKIE = "phenikaa_server_session"
 OIDC_COOKIE = "phenikaa_oidc_transaction"
 GOOGLE_OAUTH_COOKIE = "phenikaa_google_oauth_transaction"
+LANGUAGE_COOKIE = "phenikaa_ui_language"
+STATUS_LABELS = {
+    "pending_login": "Action required",
+    "active": "Connected",
+    "needs_human": "Attention needed",
+    "disabled": "Disabled",
+         }
 MAX_EXPORT_FORM_BYTES = 1024 * 1024
 
 
@@ -112,6 +121,9 @@ class ServerApplication:
         if path == "/healthz":
             self._json(handler, 200, {"ok": True})
             return
+        if path == "/static/styles.css":
+            self._stylesheet(handler)
+            return
         if path == "/favicon.ico":
             self._empty(handler, 204)
             return
@@ -120,6 +132,9 @@ class ServerApplication:
             return
         if path == "/terms":
             self._html(handler, 200, self._layout("Terms of Service", terms_body(self.config.policy_contact)))
+            return
+        if path == "/about":
+            self._about(handler)
             return
         if path == "/auth/login":
             self._start_oidc(handler)
@@ -131,15 +146,34 @@ class ServerApplication:
             self._finish_google_oauth(handler, urllib.parse.parse_qs(parsed.query))
             return
         identity = self._identity(handler)
-        if path == "/" and identity is None:
-            self._landing(handler)
-            return
         if identity is None:
+            if path == "/":
+                self._public_export(handler)
+                return
+            if path == "/dashboard":
+                self._redirect(handler, "/auth/login")
+                return
             self._redirect(handler, "/auth/login")
             return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
+        if path == "/language":
+            language = (urllib.parse.parse_qs(parsed.query).get("lang") or [""])[0]
+            if language not in ("en", "vi"):
+                self._error(handler, 400, "unsupported language")
+                return
+            target = (urllib.parse.parse_qs(parsed.query).get("return") or ["/"])[0]
+            if target not in ("/", "/dashboard", "/about", "/settings"):
+                target = "/"
+            self._redirect_language(handler, target, language)
+            return
         if path == "/":
+            self._public_export(handler)
+            return
+        if path == "/dashboard":
             self._dashboard(handler, user, identity)
+            return
+        if path == "/settings":
+            self._settings(handler, user, identity)
             return
         parts = [part for part in path.split("/") if part]
         if len(parts) >= 2 and parts[0] == "sessions":
@@ -166,7 +200,7 @@ class ServerApplication:
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         path = urllib.parse.urlsplit(handler.path).path
         identity = self._identity(handler)
-        if identity is None:
+        if identity is None and path != "/export":
             self._error(handler, 401, "authentication required")
             return
         try:
@@ -177,14 +211,46 @@ class ServerApplication:
         except (UnicodeError, ValueError):
             self._error(handler, 400, "invalid form submission")
             return
-        if not self._csrf_valid(handler, identity, form):
+        if path == "/export":
+            # The export form is public even when a logged-in user visits it.
+            # Accept its signed form token as well as the authenticated session token.
+            csrf_valid = self._public_csrf_valid(handler, form) or (
+                identity is not None and self._csrf_valid(handler, identity, form)
+            )
+        else:
+            csrf_valid = self._csrf_valid(handler, identity, form) if identity is not None else False
+        if not csrf_valid:
             self._error(handler, 403, "invalid CSRF token")
             return
         if path == "/export":
             self._export(handler, form)
             return
+        if identity is None:
+            self._error(handler, 401, "authentication required")
+            return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
         if path == "/auth/logout":
+            self._redirect(handler, "/", clear_cookie=True)
+            return
+        if path == "/account/delete":
+            if str(form.get("confirmation") or "") != "DELETE":
+                self._error(handler, 400, "type DELETE to confirm account deletion")
+                return
+            for session in self.database.list_sessions(int(user["id"])):
+                session_id = str(session["id"])
+                lock = self.broker.try_profile_lock(session_id)
+                if lock is None:
+                    self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                    return
+                try:
+                    if self.google is not None and self.database.get_google_connection(session_id) is not None:
+                        self.google.disconnect(session_id)
+                    self.broker.delete_profile(session_id)
+                    shutil.rmtree(self.config.exports_dir / session_id, ignore_errors=True)
+                    self.broker.forget_attempt(session_id)
+                finally:
+                    lock.release()
+            self.database.delete_user(int(user["id"]))
             self._redirect(handler, "/", clear_cookie=True)
             return
         if path == "/sessions":
@@ -390,63 +456,116 @@ class ServerApplication:
         finally:
             lock.release()
         self.sync_engine.request_sync(str(session["id"]))
-        self._redirect(handler, "/", clear_cookie=clear_google_cookie)
-
-    def _landing(self, handler: BaseHTTPRequestHandler) -> None:
-        body = """
-        <header class="site-header"><a class="wordmark" href="/">Phenikaa / Calendar</a><a class="button button-small" href="/auth/login">Login</a></header>
-        <main class="landing">
-        <section class="hero"><div><p class="eyebrow">Your semester, made portable</p><h1>Carry your timetable beyond the portal.</h1>
-        <p class="lede">Turn Phenikaa classes and exams into calendar files you control. Export once for Apple Calendar, Google Calendar, Outlook, or a spreadsheet. Syncing is entirely optional.</p>
-        <p><a class="button" href="/auth/login">Login to export <span aria-hidden="true">→</span></a></p></div>
-        <div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section>
-        <section class="feature-grid" aria-label="How it works">
-        <article><span class="step">01</span><h2>Use your session</h2><p>Bring a saved authenticated page or provide your current portal token manually. Your password is never requested.</p></article>
-        <article><span class="step">02</span><h2>Choose your range</h2><p>Select the dates you need, from a single week to the full academic year.</p></article>
-        <article><span class="step">03</span><h2>Keep the files</h2><p>Download ICS, XLSX, and JSON together. The one-shot export does not connect to Google or start synchronization.</p></article>
-        </section></main>"""
-        self._html(handler, 200, self._layout("Phenikaa Calendar Exporter", body), no_store=True)
+        self._redirect(handler, "/dashboard", clear_cookie=clear_google_cookie)
 
     def _dashboard(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         csrf = html.escape(str(identity["csrf"]))
+        language = self._language(handler)
+        vi = language == "vi"
+        text = {
+             "sessions": "Các phiên lịch của bạn" if vi else "Your calendar sessions",
+             "description": "Kết nối, cấu hình và xuất lịch học của bạn từ một nơi." if vi else "Connect, configure, and export your academic calendar from one place.",
+              "export_eyebrow": "Tạo lịch nhanh" if vi else "Quick export",
+             "export_title": "Tạo file lịch" if vi else "Download calendar file",
+             "export_description": "" if vi else "",
+             "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
+            "saved": "Trang đã xác thực" if vi else "Saved authenticated page",
+            "html": "HTML index.aspx đã xác thực" if vi else "Authenticated index.aspx HTML",
+            "file_hint": "Chọn mã nguồn trang đã lưu có chứa AXYZCLRVN. Tệp có token riêng tư; hãy xóa tệp sau khi hoàn tất." if vi else "Choose the saved page source containing AXYZCLRVN. The file contains a private token; delete it when finished.",
+             "manual": "Phiên thủ công" if vi else "Manual session", "user_id": "ID người dùng" if vi else "User ID",
+             "manual_hint": "Cung cấp cả hai trường và để trống trường trang đã lưu." if vi else "Provide both fields and leave the saved-page field empty.",
+              "export": "Tạo lịch" if vi else "Download calendar file", "or": "HOẶC" if vi else "OR",
+        }
         rows = []
+        summary = []
         for session in self.database.list_sessions(int(user["id"])):
             sid = html.escape(str(session["id"]))
             label = html.escape(str(session["label"]))
             status = html.escape(str(session["status"]))
+            status_label = html.escape(self._status_label(str(session["status"]), language))
             error = html.escape(str(session.get("last_sync_error") or ""))
-            google = self._google_status_markup(str(session["id"]), csrf)
+            google = self._google_status_markup(str(session["id"]), csrf, language)
+            is_active = str(session["status"]) == "active"
+            export_dir = self.config.exports_dir / str(session["id"])
+            has_exports = is_active and (export_dir / "calendar.ics").is_file() and (export_dir / "calendar.json").is_file()
+            downloads = "" if not has_exports else f"""
+            <div class="session-section"><h3>{'Tệp đã xuất' if vi else 'Exports'}</h3><div class="action-row"><a class="button button--quiet" href="/sessions/{sid}/download/calendar.ics">Download ICS</a><a class="button button--quiet" href="/sessions/{sid}/download/calendar.json">Download JSON</a></div></div>"""
+            sync_action = "" if not is_active else f"""<form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--primary">{'Đồng bộ lịch' if vi else 'Sync calendar'}</button></form>"""
+            last_sync = html.escape(self._friendly_timestamp(session.get("last_sync_at"), language))
+            summary.append(f"<div class=\"summary-item\"><span>{label}</span><strong>{status_label}</strong><small>{last_sync}</small></div>")
             rows.append(f"""
-            <article><h2>{label}</h2><p>Status: <strong>{status}</strong></p>
-            <p>{error}</p><p><a href="/sessions/{sid}/login">Open sign-in</a> ·
-            <a href="/sessions/{sid}/download/calendar.ics">ICS</a> ·
-            <a href="/sessions/{sid}/download/calendar.json">JSON</a></p>
-            {google}
-            <form method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
-            <label>From <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label>
-            <label>To <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label>
-            <button>Save range</button></form>
-            <form method="post" action="/sessions/{sid}/sync"><input type="hidden" name="csrf" value="{csrf}"><button>Sync now</button></form>
-            <form method="post" action="/sessions/{sid}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="danger">Delete</button></form></article>""")
+            <article class="session-card"><div class="session-card__head"><div><p class="eyebrow">Phenikaa account</p><h2>{label}</h2></div><span class="status status--{status}">{status_label}</span></div>
+            <p class="session-card__error">{error}</p><div class="session-section session-section--connection"><h3>{'Kết nối' if vi else 'Connection'}</h3><div class="action-row"><a class="button button--primary" href="/sessions/{sid}/login">{'Kết nối lại tài khoản' if is_active and vi else 'Reconnect account' if is_active else 'Đăng nhập để kết nối' if vi else 'Sign in to connect'}</a>{sync_action}</div></div>
+            <div class="session-section"><h3>{'Khoảng thời gian lịch' if vi else 'Calendar range'}</h3><form class="range-form" method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
+            <div class="field-group"><label>{text['from']} <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label><label>{text['to']} <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label></div>
+            <button class="button button--primary">{'Lưu khoảng thời gian' if vi else 'Save date range'}</button></form></div>
+            {downloads}<div class="session-section"><h3>Google Calendar</h3><div class="integration">{google}</div></div></article>""")
         start, end = academic_year_range()
         new_session_form = "" if rows else f"""
-        <section><h2>New session</h2><form method="post" action="/sessions">
+         <section class="setup-card"><p class="eyebrow">{'KẾT NỐI ĐẦU TIÊN' if vi else 'FIRST CONNECTION'}</p><h2>{'Phiên mới: kết nối tài khoản Phenikaa' if vi else 'New session: connect a Phenikaa account'}</h2><p>{'Chọn khoảng thời gian học tập, sau đó đăng nhập một lần. Máy chủ mã hóa và tự động theo dõi phiên của bạn.' if vi else 'Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.'}</p><form method="post" action="/sessions">
         <input type="hidden" name="csrf" value="{csrf}"><label>Name <input name="label" value="Phenikaa account"></label>
-        <label>From <input type="date" name="range_start" value="{start.isoformat()}"></label>
-        <label>To <input type="date" name="range_end" value="{end.isoformat()}"></label><button>Create and sign in</button></form></section>
+         <label>{text['from']} <input type="date" name="range_start" value="{start.isoformat()}"></label>
+         <label>{text['to']} <input type="date" name="range_end" value="{end.isoformat()}"></label><button class="button button--primary">{'Tạo và đăng nhập' if vi else 'Create and sign in'}</button></form></section>
         """
-        export_form = f"""<section class="export-panel"><div class="section-heading"><div><p class="eyebrow">One-shot export</p><h2>Download without syncing</h2></div><p>Credentials stay in memory for this request and are not added to a server session.</p></div>
-        <form class="export-form" method="post" action="/export"><input type="hidden" name="csrf" value="{csrf}">
-        <div class="date-row"><label>From <input required type="date" name="range_start" value="{start.isoformat()}"></label>
-        <label>To <input required type="date" name="range_end" value="{end.isoformat()}"></label></div>
-        <div class="credential-grid"><fieldset><legend>Saved authenticated page</legend><label>Authenticated index.aspx HTML<textarea name="bootstrap_html" rows="7" placeholder="Paste the saved page source containing AXYZCLRVN"></textarea></label><p class="hint">Use this by itself. The file contains a private token; delete it when finished.</p></fieldset>
-        <div class="or" aria-hidden="true">or</div><fieldset><legend>Manual session</legend><label>User ID<input name="userId" autocomplete="off"></label><label>Token JWT<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">Provide both fields and leave the saved-page field empty.</p></fieldset></div>
-        <button class="button" type="submit">Export calendar files</button></form></section>"""
+        summary_markup = f"<section class=\"summary-grid\">{''.join(summary)}</section>" if summary else ""
+        export_form = f"""<section class=\"export-panel\"><div class=\"section-heading\"><div><p class=\"eyebrow\">{text['export_eyebrow']}</p><h2>{text['export_title']}</h2></div><p class=\"page-description\">{text['export_description']}</p></div>
+         <form class=\"export-form\" method=\"post\" action=\"/export\" enctype=\"multipart/form-data\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
+        <div class=\"date-row\"><label>From <input required type=\"date\" name=\"range_start\" value=\"{start.isoformat()}\"></label>
+        <label>To <input required type=\"date\" name=\"range_end\" value=\"{end.isoformat()}\"></label></div>
+         <div class=\"credential-grid\"><fieldset><legend>{text['saved']}</legend><label>{text['html']}<input type=\"file\" name=\"bootstrap_file\" accept=\".html,text/html\"></label><p class=\"hint\">{text['file_hint']}</p></fieldset>
+        <div class=\"or\" aria-hidden=\"true\">{text['or']}</div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name=\"userId\" autocomplete=\"off\"></label><label>Token JWT<input type=\"password\" name=\"tokenJWT\" autocomplete=\"off\"></label><p class=\"hint\">{text['manual_hint']}</p></fieldset></div>
+        <button class=\"button button--primary\" type=\"submit\">{text['export']}</button></form></section>"""
+        export_form = ""
         body = f"""
-        <header class="site-header"><a class="wordmark" href="/">Phenikaa / Calendar</a><span>{html.escape(str(user['display_name']))}</span></header>
-        <main><header class="page-heading"><p class="eyebrow">Calendar workspace</p><h1>Your academic calendar</h1></header>{export_form}{new_session_form}
-        {''.join(rows) or '<p>No sessions yet.</p>'}</main>"""
+        {self._navigation(user, identity, "dashboard", language)}
+         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']}</p></div></div>{export_form}{summary_markup}{new_session_form}
+         {''.join(rows) or f'<section class="empty-state"><p class="eyebrow">{"CHƯA CÓ NGUỒN HOẠT ĐỘNG" if vi else "NO ACTIVE SOURCE"}</p><h2>{"Không gian làm việc đã sẵn sàng." if vi else "Your workspace is ready."}</h2><p>{"Kết nối tài khoản Phenikaa ở trên để bắt đầu theo dõi và xuất lịch học của bạn." if vi else "Connect your Phenikaa account above to begin observing and exporting your academic calendar."}</p></section>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
+
+    def _landing(self, handler: BaseHTTPRequestHandler) -> None:
+        body = """
+        <header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><a class="button button--primary" href="/auth/login">Login</a></header>
+        <main><section class="landing-hero"><div><p class="eyebrow">Your semester, made portable</p><h1>Carry your timetable beyond the portal.</h1>
+        <p class="hero-lede">Turn Phenikaa classes and exams into calendar files you control. Export once for Apple Calendar, Google Calendar, Outlook, or a spreadsheet. Syncing is entirely optional.</p>
+        <p><a class="button button--primary" href="/auth/login">Login to export</a></p></div>
+        <div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section>
+        <section class="feature-grid" aria-label="How it works"><article><span class="step">01</span><h2>Use your session</h2><p>Bring a saved authenticated page or provide your current portal token manually. Your password is never requested.</p></article>
+        <article><span class="step">02</span><h2>Choose your range</h2><p>Select the dates you need, from a single week to the full academic year.</p></article>
+        <article><span class="step">03</span><h2>Keep the files</h2><p>Download ICS, XLSX, and JSON together. The one-shot export does not connect to Google or start synchronization.</p></article></section></main>"""
+        self._html(handler, 200, self._layout("Phenikaa Calendar Exporter", body), no_store=True)
+
+    def _public_export(self, handler: BaseHTTPRequestHandler) -> None:
+        language = self._language(handler)
+        vi = language == "vi"
+        start, end = academic_year_range()
+        csrf = self.signed_sessions.create({"purpose": "public_export"}, lifetime=30 * 60)
+        empty_file_label = json.dumps("Chưa chọn file" if vi else "No file selected")
+        text = {
+             "eyebrow": "TẠO LỊCH NHANH" if vi else "QUICK EXPORT",
+            "title": "Tạo file lịch học dạng .ics" if vi else "Export schedule as .ics",
+            "description": "Dùng file HTML đã lưu hoặc token hiện tại để tải lịch học." if vi else "Use a saved authenticated HTML page or your current token to download your calendar. Credentials are processed for this export only and are not stored.",
+             "saved": "File HTML" if vi else "HTML file",
+             "file_prompt": "Kéo thả file HTML hoặc bấm để chọn" if vi else "Drop an HTML file here or click to choose",
+            "html": "" if vi else "",
+             "file_hint": "Mở trang lịch học trên QLDT, nhấn Ctrl + S để lưu trang, sau đó chọn file HTML vừa lưu." if vi else "Open your timetable on QLDT, press Ctrl + S to save the page, then choose the HTML file you saved.",
+             "manual": "Nhập thông tin thủ công" if vi else "Enter details manually",
+             "user_id": "ID người dùng" if vi else "User ID",
+            "manual_hint": "Cung cấp cả hai trường và để trống file HTML." if vi else "Provide both fields and leave the HTML file empty.",
+            "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
+             "or": "HOẶC" if vi else "OR", "submit": "Xuất tệp lịch" if vi else "Export calendar files",
+        }
+        body = f"""{self._navigation(None, None, "export", language)}
+          <main><section class="export-shell"><div class="export-copy"><p class="eyebrow">{text['eyebrow']}</p><h1>{text['title']}</h1><p class="hero-lede">{text['description']}</p>
+          <form class="export-form" method="post" action="/export" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{csrf}"><div class="date-row"><label>{text['from']} <input required type="date" name="range_start" value="{start.isoformat()}"></label><label>{text['to']} <input required type="date" name="range_end" value="{end.isoformat()}"></label></div>
+          <div class="credential-grid"><fieldset><legend>{text['saved']}</legend><label class="file-dropzone" for="bootstrap-file"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="file-dropzone__copy"><strong>{text['file_prompt']}</strong><small class="file-name" aria-live="polite">{'Chưa chọn file' if vi else 'No file selected'}</small></span><input id="bootstrap-file" type="file" name="bootstrap_file" accept=".html,text/html"></label><p class="hint">{text['file_hint']}</p></fieldset><div class="or" aria-hidden="true"><span>{text['or']}</span></div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name="userId" autocomplete="off"></label><label>{'Mã Token' if vi else 'Access token'}<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">{text['manual_hint']}</p></fieldset></div><button class="button button--primary" type="submit">{text['submit']}</button></form></div><div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section></main>
+          <script>const dropzone=document.querySelector('.file-dropzone');const fileInput=document.querySelector('#bootstrap-file');const fileName=document.querySelector('.file-name');if(dropzone&&fileInput&&fileName){{const showFile=()=>{{fileName.textContent=fileInput.files[0]?.name||{empty_file_label};}};['dragenter','dragover'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.add('file-dropzone--active');}}));['dragleave','drop'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.remove('file-dropzone--active');}}));dropzone.addEventListener('drop',e=>{{if(e.dataTransfer.files.length){{fileInput.files=e.dataTransfer.files;showFile();}}}});fileInput.addEventListener('change',showFile);}}</script>"""
+        self._html(handler, 200, self._layout("Quick export", body), no_store=True)
+
+    def _about(self, handler: BaseHTTPRequestHandler) -> None:
+        language = self._language(handler)
+        vi = language == "vi"
+        body = f"""{self._navigation(None, None, "about", language)}<main><section class="landing-hero"><div><p class="eyebrow">ABOUT</p><h1>{'Lịch học của bạn, dễ mang theo.' if vi else 'Your timetable, made portable.'}</h1><p class="hero-lede">{'Phenikaa Calendar Exporter chuyển lịch học và lịch thi thành các file ICS, XLSX và JSON để bạn dùng ở nơi mình muốn.' if vi else 'Phenikaa Calendar Exporter turns your classes and exams into ICS, XLSX, and JSON files you can use wherever you work.'}</p></div></section><section class="feature-grid" aria-label="About the exporter"><article><span class="step">01</span><h2>{'Tạo file lịch nhanh' if vi else 'Quick export'}</h2><p>{'Không cần đăng nhập. Dùng file HTML đã xác thực hoặc userId và tokenJWT. Thông tin không được lưu.' if vi else 'No account required. Use a saved authenticated HTML page or userId and tokenJWT. Nothing is stored.'}</p></article><article><span class="step">02</span><h2>{'Bảng điều khiển' if vi else 'Dashboard'}</h2><p>{'Đăng nhập để giữ phiên Phenikaa, tự động đồng bộ và kết nối Google Calendar.' if vi else 'Sign in to keep a Phenikaa session, sync automatically, and connect Google Calendar.'}</p></article><article><span class="step">03</span><h2>{'Riêng tư' if vi else 'Privacy'}</h2><p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p></article></section></main>"""
+        self._html(handler, 200, self._layout("About", body), no_store=True)
 
     def _export(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> None:
         try:
@@ -498,17 +617,78 @@ class ServerApplication:
         handler.end_headers()
         handler.wfile.write(body)
 
-    def _google_status_markup(self, session_id: str, csrf: str) -> str:
+    def _settings(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
+        language = self._language(handler)
+        csrf = html.escape(str(identity["csrf"]))
+        vi = language == "vi"
+        delete_title = "Xóa tài khoản" if language == "vi" else "Delete account"
+        delete_copy = (
+            "Xóa phiên Phenikaa, dữ liệu xuất và kết nối Google của bạn. Hành động này không thể hoàn tác."
+            if language == "vi"
+            else "Delete your Phenikaa session, exports, and Google connections. This cannot be undone."
+        )
+        session_settings = "".join(
+            f"""<div class="managed-session"><div><strong>{html.escape(str(session["label"]))}</strong><p>{html.escape(self._status_label(str(session["status"]), language))}</p></div><form method="post" action="/sessions/{html.escape(str(session["id"]))}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Xóa phiên' if vi else 'Delete session'}</button></form></div>"""
+            for session in self.database.list_sessions(int(user["id"]))
+        )
+        session_management = f"<section class=\"settings-card\"><p class=\"eyebrow\">{'QUẢN LÝ PHIÊN' if vi else 'SESSION MANAGEMENT'}</p><h2>{'Các phiên Phenikaa' if vi else 'Phenikaa sessions'}</h2>{session_settings or f'<p class=\"text-muted\">{"Chưa có phiên nào được kết nối." if vi else "No sessions connected."}</p>'}</section>"
+        body = f"""
+        {self._navigation(user, identity, "settings", language)}
+        <main><div class="section-heading"><div><p class="eyebrow">{'TÙY CHỈNH' if vi else 'PREFERENCES'}</p><h2>{'Cài đặt' if vi else 'Settings'}</h2></div><span class="section-rule"></span></div>
+        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">{'KHU VỰC NGUY HIỂM' if vi else 'DANGER ZONE'}</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}"><label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
+        self._html(handler, 200, self._layout("Settings", body), no_store=True)
+
+    def _navigation(self, user: dict[str, Any] | None, identity: dict[str, Any] | None, active: str, language: str) -> str:
+        vi = language == "vi"
+        export_label = "Tạo lịch nhanh" if vi else "Quick export"
+        dashboard_label = "Bảng điều khiển" if language == "vi" else "Dashboard"
+        settings_label = "Cài đặt" if language == "vi" else "Settings"
+        sign_out = "Đăng xuất" if language == "vi" else "Sign out"
+        about_label = "Giới thiệu" if vi else "About"
+        active_export = " nav-link--active" if active == "export" else ""
+        active_dashboard = " nav-link--active" if active == "dashboard" else ""
+        active_settings = " nav-link--active" if active == "settings" else ""
+        target = {"export": "/", "dashboard": "/dashboard", "about": "/about", "settings": "/settings"}.get(active, "/")
+        language_links = f"<a class=\"language-option{' language-option--active' if language == 'vi' else ''}\" href=\"/language?lang=vi&return={urllib.parse.quote(target)}\">VI</a><a class=\"language-option{' language-option--active' if language == 'en' else ''}\" href=\"/language?lang=en&return={urllib.parse.quote(target)}\">EN</a>"
+        account = ""
+        if user is not None and identity is not None:
+            csrf = html.escape(str(identity["csrf"]))
+            account = f"<span>{html.escape(str(user['display_name']))}</span><a class=\"nav-link{' nav-link--active' if active == 'settings' else ''}\" href=\"/settings\">{settings_label}</a><form method=\"post\" action=\"/auth/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button class=\"text-button\">{sign_out}</button></form>"
+        else:
+            account = f"<a class=\"button button--primary\" href=\"/auth/login\">{'Đăng nhập' if vi else 'Sign in'}</a>"
+        dashboard = f'<a class="nav-link{active_dashboard}" href="/dashboard">{dashboard_label}</a>' if user is not None else f'<a class="nav-link" href="/dashboard">{dashboard_label}</a>'
+        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}<a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
+
+    def _language(self, handler: BaseHTTPRequestHandler) -> str:
+        return "vi" if self._cookie(handler, LANGUAGE_COOKIE) == "vi" else "en"
+
+    def _status_label(self, status: str, language: str) -> str:
+        if language == "vi":
+            return {"pending_login": "Cần thao tác", "active": "Đã kết nối", "needs_human": "Cần chú ý", "disabled": "Đã tắt"}.get(status, "Không rõ")
+        return STATUS_LABELS.get(status, "Unknown")
+
+    def _friendly_timestamp(self, value: object, language: str = "en") -> str:
+        if not value:
+            return "Đồng bộ lần cuối: Chưa có" if language == "vi" else "Last synced: Not yet"
+        try:
+            timestamp = datetime.fromisoformat(str(value))
+        except ValueError:
+            return "Đồng bộ lần cuối: Không rõ" if language == "vi" else "Last synced: Unknown"
+        formatted = timestamp.strftime("%b %d, %Y at %I:%M %p").replace(" 0", " ")
+        return ("Đồng bộ lần cuối: " if language == "vi" else "Last synced: ") + formatted
+
+    def _google_status_markup(self, session_id: str, csrf: str, language: str = "en") -> str:
         sid = html.escape(session_id)
+        vi = language == "vi"
         if self.google is None:
-            return "<p>Google Calendar: <strong>Unavailable</strong></p>"
+            return f"<p>Google Calendar: <strong>{'Không khả dụng' if vi else 'Unavailable'}</strong></p>"
         connection = self.database.get_google_connection(session_id)
         if connection is None:
-            return f"<p>Google Calendar: <strong>Not connected</strong> <a href=\"/sessions/{sid}/google/connect\">Connect</a></p>"
+            return f"<p>Google Calendar: <strong>{'Chưa kết nối' if vi else 'Not connected'}</strong> <a href=\"/sessions/{sid}/google/connect\">{'Kết nối' if vi else 'Connect'}</a></p>"
         last_error = html.escape(str(connection.get("last_error") or ""))
         error = f"<p>{last_error}</p>" if last_error else ""
-        return f"""<p>Google Calendar: <strong>Connected</strong></p>{error}
-            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="danger">Disconnect Google</button></form>"""
+        return f"""<p>Google Calendar: <strong>{'Đã kết nối' if vi else 'Connected'}</strong></p>{error}
+            <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Ngắt kết nối Google' if vi else 'Disconnect Google'}</button></form>"""
 
     def _login_page(self, handler: BaseHTTPRequestHandler, session: dict[str, Any], identity: dict[str, Any]) -> None:
         sid = str(session["id"])
@@ -526,16 +706,18 @@ class ServerApplication:
 
         self.broker.start_login(sid, complete, failed)
         csrf = json.dumps(str(identity["csrf"]))
-        body = f"""<header class="site-header"><h1>Phenikaa sign-in</h1></header><main>
-        <p>Sign in on the streamed portal below. Keyboard and pointer input is relayed through this server to Phenikaa and is not stored.</p>
-        <img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal">
-        <p id="status">Waiting for sign-in...</p></main><script>
+        body = f"""<main class="signin-shell">
+        <section class="signin-console" aria-label="Phenikaa streamed sign-in">
+        <div class="signin-console__top"><span><span class="signin-kicker__dot"></span>Secure browser relay</span><span class="signin-console__lock">Private relay</span></div>
+        <div class="signin-frame"><img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal"><span class="signin-frame__corner signin-frame__corner--tl"></span><span class="signin-frame__corner signin-frame__corner--tr"></span><span class="signin-frame__corner signin-frame__corner--bl"></span><span class="signin-frame__corner signin-frame__corner--br"></span></div>
+        <div class="signin-console__bottom"><span id="status">Waiting for sign-in...</span><span class="signin-hint">Click the portal to focus</span></div>
+        </section></main><script>
         const csrf={csrf}, img=document.getElementById('frame');
         function send(ev){{fetch('/sessions/{sid}/event',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify(ev)}})}}
         img.onclick=e=>{{const r=img.getBoundingClientRect();send({{type:'click',x:(e.clientX-r.left)*img.naturalWidth/r.width,y:(e.clientY-r.top)*img.naturalHeight/r.height}});img.focus()}};
         document.onkeydown=e=>{{if(['Shift','Control','Alt','Meta','CapsLock'].includes(e.key))return;e.preventDefault();send(e.key.length===1?{{type:'char',key:e.key}}:{{type:'special',key:e.key}})}};
         document.onpaste=e=>{{const text=e.clipboardData.getData('text');if(text)send({{type:'insert',text}})}};
-        setInterval(async()=>{{const r=await fetch('/sessions/{sid}/status.json');const s=await r.json();document.getElementById('status').textContent=s.status;if(s.status==='active')location='/' }},1500);
+         setInterval(async()=>{{const r=await fetch('/sessions/{sid}/status.json');const s=await r.json();document.getElementById('status').textContent=s.status;if(s.status==='active')location='/dashboard' }},1500);
         </script>"""
         self._html(handler, 200, self._layout("Phenikaa sign-in", body), no_store=True)
 
@@ -593,6 +775,11 @@ class ServerApplication:
         supplied = handler.headers.get("X-CSRF-Token") or form.get("csrf") or ""
         return secrets.compare_digest(str(identity.get("csrf", "")), supplied)
 
+    def _public_csrf_valid(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> bool:
+        supplied = handler.headers.get("X-CSRF-Token") or form.get("csrf") or ""
+        token = self.signed_sessions.verify(str(supplied))
+        return bool(token and token.get("purpose") == "public_export")
+
     def _validated_range(self, start_value: str, end_value: str) -> tuple[str, str]:
         try:
             start = date.fromisoformat(start_value)
@@ -611,8 +798,7 @@ class ServerApplication:
         return {key: items[0] for key, items in values.items() if items}
 
     def _read_export_form(self, handler: BaseHTTPRequestHandler) -> dict[str, str]:
-        if "application/x-www-form-urlencoded" not in (handler.headers.get("Content-Type") or ""):
-            raise ValueError("unsupported content type")
+        content_type = handler.headers.get("Content-Type") or ""
         try:
             length = int(handler.headers.get("Content-Length") or 0)
         except ValueError as error:
@@ -624,8 +810,33 @@ class ServerApplication:
         raw = handler.rfile.read(length)
         if len(raw) != length:
             raise ValueError("incomplete form submission")
+        if content_type.startswith("multipart/form-data"):
+            return self._parse_export_multipart(content_type, raw)
+        if "application/x-www-form-urlencoded" not in content_type:
+            raise ValueError("unsupported content type")
         values = urllib.parse.parse_qs(raw.decode("utf-8"), keep_blank_values=False)
         return {key: items[0] for key, items in values.items() if items}
+
+    def _parse_export_multipart(self, content_type: str, raw: bytes) -> dict[str, str]:
+        message = BytesParser(policy=default).parsebytes(
+            b"Content-Type: " + content_type.encode("ascii") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw
+        )
+        if not message.is_multipart():
+            raise ValueError("invalid multipart form")
+        values: dict[str, str] = {}
+        for part in message.iter_parts():
+            field_name = part.get_param("name", header="content-disposition")
+            if not field_name or field_name in values:
+                continue
+            payload = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                values[field_name] = payload.decode(charset)
+            except (LookupError, UnicodeDecodeError) as error:
+                raise ValueError("invalid multipart field") from error
+        if "bootstrap_file" in values:
+            values["bootstrap_html"] = values.pop("bootstrap_file")
+        return values
 
     def _read_json(self, handler: BaseHTTPRequestHandler) -> Any:
         length = min(int(handler.headers.get("Content-Length") or 0), 64 * 1024)
@@ -655,19 +866,43 @@ class ServerApplication:
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
+    def _redirect_language(self, handler: BaseHTTPRequestHandler, location: str, language: str) -> None:
+        handler.send_response(303)
+        handler.send_header("Location", location)
+        handler.send_header("Set-Cookie", f"{LANGUAGE_COOKIE}={language}; Path=/; Max-Age=31536000; SameSite=Lax")
+        handler.send_header("Content-Length", "0")
+        handler.end_headers()
+
     def _send_clear_cookie(self, handler: BaseHTTPRequestHandler, clear_cookie: str | None) -> None:
         if clear_cookie:
             handler.send_header("Set-Cookie", f"{clear_cookie}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
 
     def _layout(self, title: str, body: str) -> str:
+        return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><link rel="stylesheet" href="/static/styles.css"></head><body>{body}</body></html>"""
+
+    def _legacy_layout(self, title: str, body: str) -> str:
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-        :root{{color-scheme:light;background:#f4efe3;color:#17251f;font:16px/1.55 "Iowan Old Style","Palatino Linotype",Georgia,serif;--ink:#17251f;--paper:#fffdf7;--red:#a33b2f;--green:#234f40;--line:#cfc5b2}}*{{box-sizing:border-box}}body{{margin:0;background:linear-gradient(90deg,rgba(35,79,64,.045) 1px,transparent 1px),#f4efe3;background-size:32px 32px}}a{{color:var(--green)}}.site-header,main,footer{{max-width:1180px;margin:auto;padding:24px 28px}}.site-header{{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}}.wordmark{{color:var(--ink);font-weight:700;letter-spacing:.06em;text-decoration:none;text-transform:uppercase}}.button,button{{display:inline-block;border:1px solid var(--ink);background:var(--green);color:#fff;cursor:pointer;font:700 1rem/1 inherit;padding:13px 20px;text-decoration:none;box-shadow:4px 4px 0 var(--ink)}}.button:hover,button:hover{{transform:translate(1px,1px);box-shadow:3px 3px 0 var(--ink)}}.button-small{{padding:9px 16px;box-shadow:3px 3px 0 var(--ink)}}button.danger{{background:var(--red)}}.hero{{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(260px,.65fr);gap:64px;align-items:center;padding:80px 0 64px;background:transparent;border:0;box-shadow:none;margin:0}}h1{{font-size:clamp(3rem,8vw,6.8rem);font-weight:500;letter-spacing:-.055em;line-height:.88;margin:.18em 0}}h2{{font-size:1.55rem;line-height:1.1}}.lede{{font-size:1.24rem;max-width:650px}}.eyebrow,.step{{font:700 .78rem/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.15em;text-transform:uppercase;color:var(--red)}}.calendar-mark{{aspect-ratio:4/5;background:var(--red);color:#fff;display:grid;grid-template-rows:auto 1fr auto;padding:24px;transform:rotate(2deg);box-shadow:12px 12px 0 var(--green)}}.calendar-mark span,.calendar-mark small{{font:700 .82rem/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.1em}}.calendar-mark strong{{align-self:center;font-size:clamp(5rem,12vw,9rem);font-weight:400;line-height:1}}.feature-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin:24px 0 72px;border:1px solid var(--line);background:var(--paper)}}article,section{{background:var(--paper);padding:24px;margin:18px 0;border:1px solid var(--line);box-shadow:4px 4px 0 #d9cdbb}}.feature-grid article{{margin:0;border:0;border-right:1px solid var(--line);box-shadow:none}}.feature-grid article:last-child{{border-right:0}}.page-heading{{padding:36px 0 12px;border:0}}.page-heading h1{{font-size:clamp(2.8rem,7vw,5.5rem)}}form{{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin:12px 0}}label{{display:grid;gap:5px;font-weight:700}}input,textarea,button{{font:inherit}}input,textarea{{width:100%;padding:10px;border:1px solid #776d61;background:#fff}}textarea{{resize:vertical}}fieldset{{min-width:0;border:1px solid var(--line);padding:18px}}legend{{font-weight:700;padding:0 6px}}.export-panel{{padding:30px}}.section-heading{{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:end}}.section-heading h2{{font-size:2.3rem;margin:.2em 0}}.export-form{{display:block}}.date-row{{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:520px;margin:20px 0}}.credential-grid{{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;margin:20px 0}}.credential-grid fieldset{{height:100%}}.or{{font-style:italic;color:#695f53}}.hint{{font-size:.9rem;color:#5f5a50}}article p a{{display:inline-block;padding:6px 2px;margin-right:6px}}code{{overflow-wrap:anywhere}}footer{{font-size:.95rem;border-top:1px solid var(--line)}}footer a{{margin-right:12px}}img{{display:block;width:100%;background:#111;outline:none;min-height:160px}}@media(max-width:760px){{.site-header,main,footer{{padding-left:18px;padding-right:18px}}.hero{{grid-template-columns:1fr;gap:38px;padding-top:48px}}.calendar-mark{{max-width:340px}}.feature-grid{{grid-template-columns:1fr}}.feature-grid article{{border-right:0;border-bottom:1px solid var(--line)}}.section-heading,.credential-grid,.date-row{{grid-template-columns:1fr}}.or{{text-align:center}}}}</style></head><body>{body}<footer><a href="/privacy">Privacy Policy</a><a href="/terms">Terms of Service</a></footer></body></html>"""
+        :root{{color-scheme:light;background:aliceblue;color:navy;font:16px/1.5 Arial,sans-serif}}*{{box-sizing:border-box}}body{{margin:0;background:aliceblue}}header,main,footer{{max-width:1180px;margin:auto;padding:24px}}.site-header{{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid lightsteelblue;padding-top:20px;padding-bottom:20px}}.brand{{display:flex;align-items:center;gap:10px;color:navy;text-decoration:none;font-size:12px;letter-spacing:.12em;font-weight:700}}.brand b{{font-weight:400}}.brand-mark{{display:grid;place-items:center;width:30px;height:30px;background:navy;color:white;font-family:Georgia,serif;font-size:18px}}.header-meta{{display:flex;align-items:center;gap:18px;color:slategray;font-size:13px}}.text-button{{border:0;background:transparent;color:navy;padding:0;cursor:pointer;font-size:13px}}.hero{{display:flex;justify-content:center;padding:clamp(50px,9vw,105px) 0 90px;border-bottom:1px solid lightsteelblue}}.eyebrow{{margin:0 0 14px;color:royalblue;font-size:11px;font-weight:700;letter-spacing:.16em}}h1,h2,p{{margin-top:0}}h1{{margin-bottom:24px;color:navy;font-family:Georgia,serif;font-size:clamp(44px,7vw,84px);font-weight:400;line-height:.98;letter-spacing:-.055em}}h1 em{{color:royalblue;font-style:normal}}.hero__lede{{max-width:530px;color:slategray;font-size:18px;line-height:1.6}}.hero__formats{{display:flex;align-items:center;gap:12px;margin-top:34px;color:slategray;font-size:10px;letter-spacing:.14em}}.hero__formats b{{padding:8px 10px;border:1px solid lightsteelblue;background:white;color:navy;font-family:monospace;font-size:12px;letter-spacing:0}}.hero__instrument{{width:100%;max-width:700px;padding:18px;background:navy;color:white;border:1px solid navy;box-shadow:14px 14px 0 lightsteelblue}}.instrument__top,.instrument__readout{{display:flex;justify-content:space-between;gap:12px;font-family:monospace;font-size:10px;letter-spacing:.08em}}.live-dot{{color:lightskyblue}}.instrument__grid{{display:grid;grid-template-columns:38px 1fr;gap:12px;margin:34px 0 24px}}.instrument__axis{{display:flex;flex-direction:column;justify-content:space-between;color:lightskyblue;font:10px/1 monospace}}.instrument__rows{{display:grid;grid-template-columns:repeat(5,1fr);grid-template-rows:repeat(6,26px);gap:5px;background:royalblue;padding:5px}}.instrument__rows i{{display:block;background:white;opacity:.92}}.instrument__rows i:nth-child(2),.instrument__rows i:nth-child(8),.instrument__rows i:nth-child(14){{grid-column:span 2;background:lightskyblue}}.instrument__rows i:nth-child(4),.instrument__rows i:nth-child(10){{background:cornflowerblue}}.instrument__readout{{border-top:1px solid royalblue;padding-top:14px}}.instrument__readout div{{display:grid;gap:5px}}.instrument__readout small{{color:lightskyblue;font-size:9px}}.instrument__readout strong{{font-size:11px}}.section-heading{{display:flex;align-items:end;gap:24px;padding:65px 0 8px}}h2{{color:navy;font-family:Georgia,serif;font-size:32px;font-weight:400;letter-spacing:-.03em}}.section-rule{{height:1px;flex:1;margin-bottom:12px;background:lightsteelblue}}article,section{{background:white;padding:28px;margin:18px 0;border:1px solid lightsteelblue;box-shadow:0 8px 24px rgba(0,0,128,.05)}}.setup-card{{max-width:920px}}.setup-card p:not(.eyebrow),.empty-state p:not(.eyebrow){{max-width:620px;color:slategray}}form{{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:18px 0}}label{{display:grid;gap:6px;color:slategray;font-size:12px;font-weight:700}}input,button{{font:inherit;padding:10px 12px;border:1px solid lightsteelblue}}input{{background:white;color:navy}}.button{{display:inline-block;text-decoration:none;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.02em}}.button--primary{{background:navy;color:white;border-color:navy}}.button--secondary{{background:royalblue;color:white;border-color:royalblue}}.button--quiet{{background:white;color:navy}}.button--danger{{background:white;color:firebrick;border-color:rosybrown}}.session-card__head,.session-card__links,.session-card__footer{{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}}.session-card__head h2{{margin-bottom:0}}.status{{padding:6px 9px;background:aliceblue;color:royalblue;font:11px monospace;letter-spacing:.08em}}.status--needs_human{{color:firebrick;background:mistyrose}}.session-card__error{{min-height:1.5em;color:firebrick}}.session-card__links{{justify-content:flex-start;margin:22px 0}}.integration{{padding:15px 0;border-top:1px solid lightsteelblue;border-bottom:1px solid lightsteelblue}}.integration p{{margin:0;color:slategray;font-size:13px}}.integration a{{color:royalblue}}.range-form{{margin-bottom:8px}}.session-card__footer{{justify-content:flex-start;margin-top:10px}}.empty-state{{border-style:dashed}}.empty-state h2{{margin-bottom:8px}}a{{color:royalblue}}code{{overflow-wrap:anywhere}}footer{{font-size:.9rem;border-top:1px solid lightsteelblue;color:slategray}}footer a{{margin-right:16px}}img{{display:block;width:100%;background:black;outline:none;min-height:160px}}@media(max-width:760px){{header,main,footer{{padding-left:18px;padding-right:18px}}.site-header{{align-items:flex-start}}.header-meta{{align-items:flex-end;flex-direction:column;gap:5px}}.hero{{padding-top:55px;padding-bottom:60px}}.hero__instrument{{box-shadow:8px 8px 0 lightsteelblue}}.hero__formats{{align-items:flex-start;flex-wrap:wrap}}.hero__formats span{{width:100%}}.section-heading{{padding-top:45px}}.section-rule{{display:none}}form label,form input,form .button{{width:100%}}.session-card__links .button{{width:100%;text-align:center}}.range-form{{display:grid}}}}
+         </style><style>:root{{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}}body{{font-family:inherit;letter-spacing:-.01em}}h1,h2{{font-family:inherit;font-weight:700;letter-spacing:-.04em}}code,.instrument__top,.instrument__readout,.instrument__axis,.status,.eyebrow,.hero__formats,.brand{{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}}article,section{{border-radius:16px;box-shadow:0 12px 30px rgba(0,0,128,.06)}}.site-header{{border-radius:0 0 16px 16px}}.brand-mark{{border-radius:9px}}input,button,.button{{border-radius:10px}}.button--primary,.button--secondary{{box-shadow:0 4px 10px rgba(0,0,128,.12)}}.status{{border-radius:999px}}.setup-card,.session-card,.empty-state{{padding:32px}}footer{{display:none}}</style></head><body>{body}</body></html>"""
+
+    def _stylesheet(self, handler: BaseHTTPRequestHandler) -> None:
+        path = Path(__file__).with_name("static") / "styles.css"
+        if not path.is_file():
+            self._error(handler, 404, "stylesheet not available")
+            return
+        body = path.read_bytes()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/css; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
 
     def _html(self, handler: BaseHTTPRequestHandler, status: int, text: str, *, no_store: bool = False) -> None:
         body = text.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
-        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         if no_store:
             handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(body)))

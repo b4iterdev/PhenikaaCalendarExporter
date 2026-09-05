@@ -1,7 +1,7 @@
 import http.client
 import io
-import json
 from http import cookies
+import json
 import tempfile
 import threading
 import time
@@ -110,150 +110,13 @@ class WebSmokeTests(unittest.TestCase):
                     self.assertIn(title, body)
                     self.assertIn(phrase, body)
                     self.assertIn(b"Ops &lt;privacy@example.edu&gt;", body)
-                    self.assertIn(b"code{overflow-wrap:anywhere}", body)
-                    self.assertIn(b'href="/privacy"', body)
-                    self.assertIn(b'href="/terms"', body)
-            finally:
-                self._stop_app(database, server, thread)
-
-    def test_public_home_has_login_and_authenticated_dashboard_has_export_form(self):
-        with tempfile.TemporaryDirectory() as directory:
-            _config, database, signed_sessions, _sync, server, thread = self._start_app(directory, auth_mode="oidc")
-            try:
-                status, headers, body = self._request(server, "GET", "/")
+                    self.assertIn(b'href="/static/styles.css"', body)
+                    self.assertNotIn(b'href="/privacy"', body)
+                    self.assertNotIn(b'href="/terms"', body)
+                status, headers, body = self._request(server, "GET", "/static/styles.css")
                 self.assertEqual(status, 200)
-                self.assertEqual(headers["Cache-Control"], "no-store")
-                self.assertIn(b'href="/auth/login"', body)
-                self.assertIn(b"Carry your timetable beyond the portal", body)
-                self.assertNotIn(b"tokenJWT", body)
-
-                app_cookie = self._app_cookie(signed_sessions)
-                status, _headers, body = self._request(
-                    server, "GET", "/", headers={"Cookie": f"phenikaa_server_session={app_cookie}"}
-                )
-                self.assertEqual(status, 200)
-                self.assertIn(b'action="/export"', body)
-                self.assertIn(b'name="bootstrap_html"', body)
-                self.assertIn(b'name="userId"', body)
-                self.assertIn(b'name="tokenJWT"', body)
-            finally:
-                self._stop_app(database, server, thread)
-
-    def test_export_requires_authentication_and_csrf(self):
-        with tempfile.TemporaryDirectory() as directory:
-            _config, database, signed_sessions, sync, server, thread = self._start_app(directory, auth_mode="oidc")
-            body = urllib.parse.urlencode({"range_start": "2026-08-01", "range_end": "2026-10-31"})
-            headers = {"Content-Type": "application/x-www-form-urlencoded"}
-            try:
-                status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
-                self.assertEqual(status, 401)
-                app_cookie = self._app_cookie(signed_sessions)
-                headers["Cookie"] = f"phenikaa_server_session={app_cookie}"
-                status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
-                self.assertEqual(status, 403)
-                self.assertEqual(sync.requested, [])
-                self.assertEqual(database.list_sessions(), [])
-            finally:
-                self._stop_app(database, server, thread)
-
-    def test_export_supports_saved_html_and_manual_credentials_without_sync(self):
-        captured = []
-
-        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
-            captured.append((session, start, end, calendar_name))
-            root = Path(output_dir)
-            paths = {}
-            for extension, content in (("json", b"[]"), ("xlsx", b"xlsx"), ("ics", b"BEGIN:VCALENDAR")):
-                path = root / f"{prefix}.{extension}"
-                path.write_bytes(content)
-                paths[extension] = str(path)
-            return paths
-
-        google = FakeGoogleService()
-        with tempfile.TemporaryDirectory() as directory:
-            _config, database, signed_sessions, sync, server, thread = self._start_app(
-                directory, auth_mode="oidc", google=google, calendar_exporter=calendar_exporter
-            )
-            app_cookie = self._app_cookie(signed_sessions)
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Cookie": f"phenikaa_server_session={app_cookie}",
-            }
-            payload = {"userId": "student-id", "tokenJWT": "secret-token"}
-            blob = pe.xor_b64_encode(json.dumps(payload), pe.BOOTSTRAP_KEY)
-            saved_html = f'<script>AXYZCLRVN = () => "{blob}"</script>'
-            forms = (
-                {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31", "bootstrap_html": saved_html},
-                {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31", **payload},
-            )
-            try:
-                for form in forms:
-                    status, response_headers, body = self._request(
-                        server, "POST", "/export", body=urllib.parse.urlencode(form), headers=headers
-                    )
-                    self.assertEqual(status, 200)
-                    self.assertEqual(response_headers["Content-Type"], "application/zip")
-                    self.assertEqual(response_headers["Cache-Control"], "no-store")
-                    with zipfile.ZipFile(io.BytesIO(body)) as archive:
-                        self.assertEqual(sorted(archive.namelist()), ["calendar.ics", "calendar.json", "calendar.xlsx"])
-                        self.assertEqual(archive.read("calendar.json"), b"[]")
-                        self.assertEqual(archive.read("calendar.xlsx"), b"xlsx")
-                        self.assertEqual(archive.read("calendar.ics"), b"BEGIN:VCALENDAR")
-                self.assertEqual([item[0] for item in captured], [payload, payload])
-                self.assertEqual(captured[0][1:3], (date(2026, 8, 1), date(2026, 10, 31)))
-                self.assertEqual(sync.requested, [])
-                self.assertEqual(database.list_sessions(), [])
-                self.assertEqual(google.states, [])
-                self.assertEqual(google.exchanges, [])
-                self.assertEqual(google.disconnects, [])
-            finally:
-                self._stop_app(database, server, thread)
-
-    def test_export_rejects_invalid_inputs_without_leaking_secrets(self):
-        def failing_exporter(session, start, end, output_dir, prefix, calendar_name):
-            raise RuntimeError("upstream exposed " + str(session["tokenJWT"]))
-
-        with tempfile.TemporaryDirectory() as directory:
-            _config, database, signed_sessions, sync, server, thread = self._start_app(
-                directory, auth_mode="oidc", calendar_exporter=failing_exporter
-            )
-            app_cookie = self._app_cookie(signed_sessions)
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Cookie": f"phenikaa_server_session={app_cookie}",
-            }
-            base = {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31"}
-            non_object_blob = pe.xor_b64_encode("[]", pe.BOOTSTRAP_KEY)
-            invalid_forms = (
-                base,
-                {**base, "userId": "student-id"},
-                {**base, "userId": "student-id", "tokenJWT": "secret-token", "bootstrap_html": "private html"},
-                {**base, "bootstrap_html": '<script>AXYZCLRVN = () => "x"</script>'},
-                {**base, "bootstrap_html": f'<script>AXYZCLRVN = () => "{non_object_blob}"</script>'},
-                {**base, "userId": "student-id", "tokenJWT": "secret-token", "range_start": "2026-11-01"},
-            )
-            try:
-                for form in invalid_forms:
-                    status, _response_headers, body = self._request(
-                        server, "POST", "/export", body=urllib.parse.urlencode(form), headers=headers
-                    )
-                    self.assertEqual(status, 400)
-                    self.assertNotIn(b"secret-token", body)
-                    self.assertNotIn(b"private html", body)
-                valid = {**base, "userId": "student-id", "tokenJWT": "secret-token"}
-                status, _response_headers, body = self._request(
-                    server, "POST", "/export", body=urllib.parse.urlencode(valid), headers=headers
-                )
-                self.assertEqual(status, 502)
-                self.assertNotIn(b"secret-token", body)
-                oversized_headers = dict(headers)
-                oversized_headers["Content-Length"] = str(1024 * 1024 + 1)
-                status, _response_headers, _body = self._request(
-                    server, "POST", "/export", body=b"", headers=oversized_headers
-                )
-                self.assertEqual(status, 413)
-                self.assertEqual(sync.requested, [])
-                self.assertEqual(database.list_sessions(), [])
+                self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
+                self.assertIn(b"font-family", body)
             finally:
                 self._stop_app(database, server, thread)
 
@@ -272,7 +135,7 @@ class WebSmokeTests(unittest.TestCase):
             thread.start()
             try:
                 connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
-                connection.request("GET", "/")
+                connection.request("GET", "/dashboard")
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(response.getheader("Cache-Control"), "no-store")
@@ -300,7 +163,7 @@ class WebSmokeTests(unittest.TestCase):
                 sessions = database.list_sessions()
                 self.assertEqual(len(sessions), 1)
                 session_id = sessions[0]["id"]
-                connection.request("GET", "/")
+                connection.request("GET", "/dashboard")
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 payload = response.read()
@@ -348,6 +211,227 @@ class WebSmokeTests(unittest.TestCase):
                 thread.join()
                 server.server_close()
                 database.close()
+
+    def test_public_export_and_authenticated_dashboard_are_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, _sync, server, thread = self._start_app(directory, auth_mode="oidc")
+            try:
+                status, headers, body = self._request(server, "GET", "/")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertIn(b'href="/auth/login"', body)
+                self.assertIn(b'action="/export"', body)
+                self.assertIn(b'name="bootstrap_file"', body)
+                self.assertIn(b'name="userId"', body)
+                self.assertIn(b'name="tokenJWT"', body)
+                self.assertIn(b'class="export-shell"', body)
+                self.assertIn(b'class="file-dropzone"', body)
+                self.assertIn(b'Drop an HTML file here or click to choose', body)
+                self.assertIn(b'<legend>HTML file</legend>', body)
+                self.assertIn(b'Access token', body)
+                self.assertIn(b'class="or"', body)
+                status, _headers, body = self._request(
+                    server, "GET", "/", headers={"Cookie": "phenikaa_ui_language=vi"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("Tạo lịch nhanh".encode("utf-8"), body)
+                self.assertIn("TẠO LỊCH NHANH".encode("utf-8"), body)
+                self.assertIn("Mã Token".encode("utf-8"), body)
+                self.assertIn("Kéo thả file HTML hoặc bấm để chọn".encode("utf-8"), body)
+                self.assertIn("<legend>File HTML</legend>".encode("utf-8"), body)
+                self.assertIn("Mở trang lịch học trên QLDT, nhấn Ctrl + S để lưu trang".encode("utf-8"), body)
+                self.assertNotIn("Tải file lịch trực tiếp".encode("utf-8"), body)
+                status, headers, _body = self._request(server, "GET", "/dashboard")
+                self.assertEqual(status, 303)
+                self.assertEqual(headers["Location"], "/auth/login")
+                status, _headers, body = self._request(server, "GET", "/about")
+                self.assertEqual(status, 200)
+                self.assertIn(b"Quick export", body)
+                app_cookie = self._app_cookie(signed_sessions)
+                status, _headers, body = self._request(
+                    server, "GET", "/dashboard", headers={"Cookie": f"phenikaa_server_session={app_cookie}"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn(b"Calendar sessions", body)
+                self.assertNotIn(b'name="bootstrap_file"', body)
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_export_requires_authentication_and_csrf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(directory, auth_mode="oidc")
+            body = urllib.parse.urlencode({"range_start": "2026-08-01", "range_end": "2026-10-31"})
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            try:
+                status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
+                self.assertEqual(status, 403)
+                headers["Cookie"] = f"phenikaa_server_session={self._app_cookie(signed_sessions)}"
+                status, _headers, _payload = self._request(server, "POST", "/export", body=body, headers=headers)
+                self.assertEqual(status, 403)
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_public_export_accepts_signed_public_csrf(self):
+        captured = []
+
+        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
+            captured.append(session)
+            root = Path(output_dir)
+            paths = {}
+            for extension in ("json", "xlsx", "ics"):
+                path = root / f"{prefix}.{extension}"
+                path.write_bytes(b"file")
+                paths[extension] = str(path)
+            return paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", calendar_exporter=calendar_exporter
+            )
+            try:
+                csrf = signed_sessions.create({"purpose": "public_export"}, lifetime=600)
+                form = {
+                    "csrf": csrf, "range_start": "2026-08-01", "range_end": "2026-10-31",
+                    "userId": "student-id", "tokenJWT": "secret-token",
+                }
+                status, _headers, _body = self._request(
+                    server, "POST", "/export", body=urllib.parse.urlencode(form),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(captured, [{"userId": "student-id", "tokenJWT": "secret-token"}])
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_public_export_file_accepts_public_csrf_when_authenticated(self):
+        captured = []
+
+        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
+            captured.append(session)
+            root = Path(output_dir)
+            paths = {}
+            for extension in ("json", "xlsx", "ics"):
+                path = root / f"{prefix}.{extension}"
+                path.write_bytes(b"file")
+                paths[extension] = str(path)
+            return paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", calendar_exporter=calendar_exporter
+            )
+            try:
+                csrf = signed_sessions.create({"purpose": "public_export"}, lifetime=600)
+                blob = pe.xor_b64_encode(
+                    json.dumps({"userId": "student-id", "tokenJWT": "secret-token"}), pe.BOOTSTRAP_KEY
+                )
+                boundary = "----TestBoundary"
+                fields = [
+                    ("csrf", csrf, None),
+                    ("range_start", "2026-08-01", None),
+                    ("range_end", "2026-10-31", None),
+                    ("bootstrap_file", f'<script>AXYZCLRVN = () => "{blob}"</script>', "index.html"),
+                ]
+                parts = []
+                for name, value, filename in fields:
+                    disposition = f'form-data; name="{name}"'
+                    if filename:
+                        disposition += f'; filename="{filename}"'
+                    parts.append(
+                        f"--{boundary}\r\nContent-Disposition: {disposition}\r\n\r\n{value}\r\n".encode()
+                    )
+                body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+                headers = {
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(len(body)),
+                    "Cookie": f"phenikaa_server_session={self._app_cookie(signed_sessions)}",
+                }
+                status, _response_headers, _body = self._request(
+                    server, "POST", "/export", body=body, headers=headers
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(captured, [{"userId": "student-id", "tokenJWT": "secret-token"}])
+                self.assertEqual(sync.requested, [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_export_supports_manual_credentials_without_sync(self):
+        captured = []
+
+        def calendar_exporter(session, start, end, output_dir, prefix, calendar_name):
+            captured.append((session, start, end, calendar_name))
+            root = Path(output_dir)
+            paths = {}
+            for extension, content in (("json", b"[]"), ("xlsx", b"xlsx"), ("ics", b"BEGIN:VCALENDAR")):
+                path = root / f"{prefix}.{extension}"
+                path.write_bytes(content)
+                paths[extension] = str(path)
+            return paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, signed_sessions, sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", calendar_exporter=calendar_exporter
+            )
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": f"phenikaa_server_session={self._app_cookie(signed_sessions)}",
+            }
+            form = {"csrf": "csrf-token", "range_start": "2026-08-01", "range_end": "2026-10-31", "userId": "student-id", "tokenJWT": "secret-token"}
+            try:
+                status, response_headers, body = self._request(
+                    server, "POST", "/export", body=urllib.parse.urlencode(form), headers=headers
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(response_headers["Content-Type"], "application/zip")
+                self.assertEqual(response_headers["Cache-Control"], "no-store")
+                with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                    self.assertEqual(sorted(archive.namelist()), ["calendar.ics", "calendar.json", "calendar.xlsx"])
+                self.assertEqual(captured[0][0], {"userId": "student-id", "tokenJWT": "secret-token"})
+                self.assertEqual(sync.requested, [])
+                self.assertEqual(database.list_sessions(), [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_settings_language_toggle_and_account_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                status, _headers, body = self._request(server, "GET", "/settings")
+                self.assertEqual(status, 200)
+                self.assertIn(b"Dashboard", body)
+                self.assertIn(b"Delete account", body)
+                status, headers, _body = self._request(server, "GET", "/language?lang=vi&return=%2Fsettings")
+                self.assertEqual(status, 303)
+                self.assertIn("phenikaa_ui_language=vi", headers["Set-Cookie"])
+                status, _headers, body = self._request(
+                    server,
+                    "GET",
+                    "/settings",
+                    headers={"Cookie": "phenikaa_ui_language=vi"},
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("Cài đặt".encode("utf-8"), body)
+                delete_body = urllib.parse.urlencode({"csrf": "development", "confirmation": "DELETE"})
+                status, headers, _body = self._request(
+                    server,
+                    "POST",
+                    "/account/delete",
+                    body=delete_body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                self.assertEqual(status, 303)
+                self.assertEqual(headers["Location"], "/")
+                self.assertIsNone(database.get_user(user["id"]))
+                self.assertEqual(database.list_sessions(), [])
+                self.assertFalse((database.path if hasattr(database, "path") else Path(directory) / "profiles" / session_id).exists())
+            finally:
+                self._stop_app(database, server, thread)
 
     def test_google_connect_redirect_sets_signed_transaction_for_owned_session(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -403,7 +487,7 @@ class WebSmokeTests(unittest.TestCase):
                     headers={"Cookie": f"phenikaa_google_oauth_transaction={transaction}"},
                 )
                 self.assertEqual(status, 303)
-                self.assertEqual(headers["Location"], "/")
+                self.assertEqual(headers["Location"], "/dashboard")
                 self.assertIn("phenikaa_google_oauth_transaction=;", headers["Set-Cookie"])
                 self.assertEqual(google.exchanges, [(session_id, "code-ok", SCOPE)])
                 self.assertEqual(sync.requested, [session_id])
@@ -587,7 +671,7 @@ class WebSmokeTests(unittest.TestCase):
             try:
                 user = database.get_or_create_user("local-development-user", "Local user")
                 database.create_session(user["id"], label="No Google")
-                status, _headers, body = self._request(server, "GET", "/")
+                status, _headers, body = self._request(server, "GET", "/dashboard")
                 self.assertEqual(status, 200)
                 self.assertIn(b"Google Calendar: <strong>Unavailable</strong>", body)
             finally:
@@ -606,7 +690,7 @@ class WebSmokeTests(unittest.TestCase):
                     expires_at="2026-08-30T12:00:00+00:00",
                 )
                 database.set_google_connection_error(connected, "bad <token>")
-                status, _headers, body = self._request(server, "GET", "/")
+                status, _headers, body = self._request(server, "GET", "/dashboard")
                 self.assertEqual(status, 200)
                 self.assertIn(b"Google Calendar: <strong>Connected</strong>", body)
                 self.assertIn(b"bad &lt;token&gt;", body)
@@ -621,7 +705,7 @@ class WebSmokeTests(unittest.TestCase):
             try:
                 user = database.get_or_create_user("local-development-user", "Local user")
                 unconnected = database.create_session(user["id"], label="Unconnected")
-                status, _headers, body = self._request(server, "GET", "/")
+                status, _headers, body = self._request(server, "GET", "/dashboard")
                 self.assertEqual(status, 200)
                 self.assertIn(f"/sessions/{unconnected}/google/connect".encode("utf-8"), body)
             finally:

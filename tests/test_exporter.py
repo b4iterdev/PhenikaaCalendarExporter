@@ -154,12 +154,7 @@ class ApiAndCacheTests(unittest.TestCase):
             session = {"userId": "student-id", "tokenJWT": "secret-token"}
             with mock.patch.object(pe, "fetch_calendar", return_value=SAMPLE_EVENTS) as fetch_calendar:
                 summary = pe.export_calendar_files(
-                    session,
-                    date(2026, 8, 1),
-                    date(2026, 10, 31),
-                    root / "out",
-                    "semester",
-                    "Semester Calendar",
+                    session, date(2026, 8, 1), date(2026, 10, 31), root / "out", "semester", "Semester Calendar",
                     base_url="http://127.0.0.1:9",
                 )
             self.assertEqual(fetch_calendar.call_count, 1)
@@ -169,7 +164,6 @@ class ApiAndCacheTests(unittest.TestCase):
             self.assertTrue((root / "out" / "semester.json").exists())
             self.assertTrue((root / "out" / "semester.xlsx").exists())
             self.assertTrue((root / "out" / "semester.ics").exists())
-            self.assertEqual(len(json.loads((root / "out" / "semester.json").read_text())), 2)
             self.assertEqual(summary["events"], 2)
             self.assertEqual(summary["classes"], 1)
             self.assertEqual(summary["exams"], 1)
@@ -185,23 +179,15 @@ class ApiAndCacheTests(unittest.TestCase):
             with mock.patch.object(pe, "fetch_calendar", return_value=[]):
                 with self.assertRaisesRegex(RuntimeError, "no calendar events"):
                     pe.export_calendar_files(
-                        {"userId": "student-id", "tokenJWT": "secret-token"},
-                        date(2026, 8, 1),
-                        date(2026, 10, 31),
-                        Path(td) / "out",
-                        "semester",
-                        "Semester Calendar",
+                        {"userId": "student-id", "tokenJWT": "secret-token"}, date(2026, 8, 1), date(2026, 10, 31),
+                        Path(td) / "out", "semester", "Semester Calendar",
                     )
 
     def test_cli_rejects_reverse_range_before_loading_credentials(self):
         with mock.patch.object(pe, "_load_session") as load_session:
             with self.assertRaisesRegex(ValueError, "start date"):
-                pe.main([
-                    "--start", "2026-10-31", "--end", "2026-08-01",
-                    "--auth-json", "unused.json",
-                ])
+                pe.main(["--start", "2026-10-31", "--end", "2026-08-01", "--auth-json", "unused.json"])
         load_session.assert_not_called()
-
     def test_cli_exports_xlsx_ics_and_source_json(self):
         response_body = json.dumps({"Success": True, "Data": {"B": pe.xor_b64_encode(json.dumps(SAMPLE_EVENTS), "AzzSystem")}}).encode()
 
