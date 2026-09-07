@@ -266,6 +266,9 @@ class Database:
         row = self._fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
         return dict(row) if row else None
 
+    def delete_user(self, user_id: int) -> None:
+        self._write("DELETE FROM users WHERE id = ?", (user_id,))
+
     # -- sessions ------------------------------------------------------
 
     def create_session(

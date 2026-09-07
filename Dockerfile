@@ -1,3 +1,10 @@
+FROM node:22-alpine AS css-builder
+
+WORKDIR /build
+COPY package.json package-lock.json tailwind.config.js ./
+COPY frontend ./frontend
+RUN npm ci && npm run build
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -12,6 +19,7 @@ WORKDIR /app
 COPY pyproject.toml setup.py README.md ./
 COPY phenikaa_exporter.py phenikaa_login.py ./
 COPY server ./server
+COPY --from=css-builder /build/server/static/styles.css ./server/static/styles.css
 
 RUN pip install --no-cache-dir '.[server]' \
     && playwright install --with-deps chromium \

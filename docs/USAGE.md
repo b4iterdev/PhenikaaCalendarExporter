@@ -69,6 +69,8 @@ The JSON is normalized source data. XLSX includes Date, weekday, start/end time,
 
 ## Web export without syncing
 
-In server mode, open the public home page and select **Login**. Once authenticated, use **Download without syncing** on the dashboard. Supply either a saved authenticated `index.aspx` response or both `userId` and `tokenJWT`, then choose the inclusive date range.
+In server mode, open the public home page and use the **Public export** tab. No account is required. Supply either a saved authenticated `index.aspx` response or both `userId` and `tokenJWT`, then choose the inclusive date range.
 
 The browser downloads `phenikaa-calendar-export.zip` with `calendar.json`, `calendar.xlsx`, and `calendar.ics`. This one-shot path does not create a retained Phenikaa session, start background synchronization, or connect to Google Calendar.
+
+The **Dashboard** tab is for signed-in users and manages retained Phenikaa sessions, background synchronization, and Google Calendar connections. The **About** tab explains the two export modes. **Settings** is available next to the signed-in user name.

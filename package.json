@@ -1,0 +1,10 @@
+{
+  "name": "phenikaa-calendar-ui",
+  "private": true,
+  "scripts": {
+    "build": "tailwindcss -i ./frontend/input.css -o ./server/static/styles.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

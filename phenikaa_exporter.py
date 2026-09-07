@@ -405,7 +405,15 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     validate_date_range(args.start, args.end)
     session = _load_session(args)
-    summary = export_calendar_files(session, args.start, args.end, args.out_dir, args.prefix, args.calendar_name, base_url=args.base_url)
+    summary = export_calendar_files(
+        session,
+        args.start,
+        args.end,
+        args.out_dir,
+        args.prefix,
+        args.calendar_name,
+        base_url=args.base_url,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
