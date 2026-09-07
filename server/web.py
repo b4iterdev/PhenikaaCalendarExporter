@@ -709,7 +709,7 @@ class ServerApplication:
         body = f"""<main class="signin-shell">
         <section class="signin-console" aria-label="Phenikaa streamed sign-in">
         <div class="signin-console__top"><span><span class="signin-kicker__dot"></span>Secure browser relay</span><span class="signin-console__lock">Private relay</span></div>
-        <div class="signin-frame"><img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal"><span class="signin-frame__corner signin-frame__corner--tl"></span><span class="signin-frame__corner signin-frame__corner--tr"></span><span class="signin-frame__corner signin-frame__corner--bl"></span><span class="signin-frame__corner signin-frame__corner--br"></span></div>
+        <div class="signin-frame"><img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal"></div>
         <div class="signin-console__bottom"><span id="status">Waiting for sign-in...</span><span class="signin-hint">Click the portal to focus</span></div>
         </section></main><script>
         const csrf={csrf}, img=document.getElementById('frame');

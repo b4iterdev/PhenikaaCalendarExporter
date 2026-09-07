@@ -221,26 +221,6 @@
     @apply min-h-[20rem] rounded-none bg-black sm:min-h-[36rem];
   }
 
-  .signin-frame__corner {
-    @apply pointer-events-none absolute h-5 w-5 border-accent;
-  }
-
-  .signin-frame__corner--tl {
-    @apply left-3 top-3 border-l border-t;
-  }
-
-  .signin-frame__corner--tr {
-    @apply right-3 top-3 border-r border-t;
-  }
-
-  .signin-frame__corner--bl {
-    @apply bottom-3 left-3 border-b border-l;
-  }
-
-  .signin-frame__corner--br {
-    @apply bottom-3 right-3 border-b border-r;
-  }
-
   .signin-console__bottom {
     @apply text-accent;
   }

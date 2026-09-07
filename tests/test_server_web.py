@@ -11,6 +11,7 @@ import zipfile
 from datetime import date
 from importlib.util import find_spec
 from pathlib import Path
+from unittest.mock import patch
 
 if find_spec("jwt") is None or find_spec("cryptography") is None:
     raise unittest.SkipTest("server tests require `pip install -e .[server]`")
@@ -117,6 +118,26 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(headers["Content-Type"], "text/css; charset=utf-8")
                 self.assertIn(b"font-family", body)
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_login_page_has_plain_stream_frame_without_corner_decoration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            user = database.get_or_create_user("local-development-user", "Local user")
+            session_id = database.create_session(int(user["id"]))
+            try:
+                with patch.object(LoginBroker, "start_login", return_value=None) as start_login:
+                    status, _headers, body = self._request(server, "GET", f"/sessions/{session_id}/login")
+                self.assertEqual(status, 200)
+                self.assertIn(b'class="signin-frame"', body)
+                self.assertIn(b'id="frame"', body)
+                self.assertNotIn(b"signin-frame__corner", body)
+                start_login.assert_called_once()
+
+                status, _headers, stylesheet = self._request(server, "GET", "/static/styles.css")
+                self.assertEqual(status, 200)
+                self.assertNotIn(b"signin-frame__corner", stylesheet)
             finally:
                 self._stop_app(database, server, thread)
 
