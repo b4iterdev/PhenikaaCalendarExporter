@@ -3,6 +3,7 @@ FROM node:22-alpine AS css-builder
 WORKDIR /build
 COPY package.json package-lock.json tailwind.config.js ./
 COPY frontend ./frontend
+COPY server ./server
 RUN npm ci && npm run build
 
 FROM python:3.12-slim
