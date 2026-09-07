@@ -16,3 +16,6 @@ phenikaa-calendar-server = "server.__main__:main"
 [tool.setuptools]
 py-modules = ["phenikaa_exporter", "phenikaa_login"]
 packages = ["server"]
+
+[tool.setuptools.package-data]
+server = ["static/styles.css"]
