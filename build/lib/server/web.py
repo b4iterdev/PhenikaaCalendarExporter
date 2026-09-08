@@ -902,7 +902,7 @@ class ServerApplication:
         body = text.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
-        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
         if no_store:
             handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(body)))

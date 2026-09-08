@@ -269,6 +269,21 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertIn(b"Quick export", body)
                 app_cookie = self._app_cookie(signed_sessions)
+                for path in ("/", "/about"):
+                    for cookie in ("", "invalid", app_cookie):
+                        with self.subTest(path=path, authenticated=cookie == app_cookie):
+                            status, _headers, body = self._request(
+                                server, "GET", path, headers={"Cookie": f"phenikaa_server_session={cookie}"}
+                            )
+                            self.assertEqual(status, 200)
+                            if cookie == app_cookie:
+                                self.assertNotIn(b'href="/auth/login"', body)
+                                self.assertIn(b'href="/settings"', body)
+                                self.assertIn(b'action="/auth/logout"', body)
+                                self.assertIn(b'value="csrf-token"', body)
+                            else:
+                                self.assertIn(b'href="/auth/login"', body)
+                                self.assertNotIn(b'action="/auth/logout"', body)
                 status, _headers, body = self._request(
                     server, "GET", "/dashboard", headers={"Cookie": f"phenikaa_server_session={app_cookie}"}
                 )
