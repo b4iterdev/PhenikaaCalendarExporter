@@ -9,7 +9,11 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from importlib.util import find_spec
 from unittest.mock import patch
+
+if find_spec("jwt") is None or find_spec("cryptography") is None:
+    raise unittest.SkipTest("server tests require `pip install -e .[server]`")
 
 import jwt
 from cryptography.fernet import Fernet
