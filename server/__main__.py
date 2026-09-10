@@ -7,6 +7,7 @@ from server.config import ServerConfig
 from server.crypto import TokenVault
 from server.db import Database
 from server.google import GoogleCalendarService, GoogleOAuthConfig
+from server.google_login import GoogleLoginService
 from server.login_broker import LoginBroker
 from server.oidc import OidcClient, SignedSessions, load_or_create_secret
 from server.refresh import ProfileLocks
@@ -25,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = ServerConfig()
+    if config.auth_mode not in ("oidc", "google", "disabled"):
+        raise RuntimeError("PHENIKAA_SERVER_AUTH must be oidc, google, or disabled")
+    if config.auth_mode == "google" and not config.google_oauth_configured:
+        raise RuntimeError("Google login requires PHENIKAA_GOOGLE_CLIENT_ID, PHENIKAA_GOOGLE_CLIENT_SECRET and PHENIKAA_GOOGLE_REDIRECT_URI")
     if args.host:
         config.host = args.host
     if args.port:
@@ -42,14 +47,15 @@ def main(argv: list[str] | None = None) -> int:
     broker = LoginBroker(config, locks=locks)
     google = None
     if config.google_oauth_configured:
-        google = GoogleCalendarService(
+        service_class = GoogleLoginService if config.auth_mode == "google" else GoogleCalendarService
+        google = service_class(
             GoogleOAuthConfig(config.google_client_id, config.google_client_secret, config.google_redirect_uri),
             database,
             vault,
         )
     sync_engine = SyncEngine(config, database, vault, locks=locks, google_syncer=google.sync_session if google else None)
     oidc = None
-    if config.auth_mode != "disabled":
+    if config.auth_mode == "oidc":
         missing = [
             name for name, value in (
                 ("PHENIKAA_OIDC_ISSUER", config.oidc_issuer),

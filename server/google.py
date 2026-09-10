@@ -82,6 +82,8 @@ def authorization_url(config: GoogleOAuthConfig, state: str, scope: str = SCOPE)
 
 
 class GoogleCalendarService:
+    user_bound: bool = False
+
     def __init__(
         self,
         config: GoogleOAuthConfig,
@@ -133,26 +135,32 @@ class GoogleCalendarService:
         self.database.delete_google_connection(session_id)
 
     def sync_session(self, session_id: str, events: list[dict[str, Any]]) -> GoogleSyncResult:
-        connection = self.database.get_google_connection(session_id)
+        connection = self.connection(session_id)
         if connection is None:
             return GoogleSyncResult(attempted=False, ok=True, detail="Google Calendar is not connected")
         try:
             access_token = self._valid_access_token(session_id, connection)
-            connection = self.database.get_google_connection(session_id) or connection
+            connection = self.connection(session_id) or connection
             calendar_id = self._ensure_app_calendar(session_id, access_token, connection)
-            connection = self.database.get_google_connection(session_id) or connection
-            if connection.get("migration_state") == GOOGLE_PRIMARY_CLEANUP_PENDING:
+            connection = self.connection(session_id) or connection
+            if not self.user_bound and connection.get("migration_state") == GOOGLE_PRIMARY_CLEANUP_PENDING:
                 self._cleanup_primary_links(session_id, access_token)
             result = self._reconcile(session_id, access_token, calendar_id, events)
-            connection = self.database.get_google_connection(session_id) or connection
-            if self._has_scope(connection, EVENTS_SCOPE):
+            connection = self.connection(session_id) or connection
+            if not self.user_bound and self._has_scope(connection, EVENTS_SCOPE):
                 self._revoke_broad_legacy_connection(session_id, connection)
-            self.database.set_google_connection_error(session_id, None)
+            self._set_error(session_id, None)
             return result
         except Exception as error:
             detail = f"Google Calendar sync failed: {error.__class__.__name__}: {str(error)[:160]}"
-            self.database.set_google_connection_error(session_id, detail)
+            self._set_error(session_id, detail)
             return GoogleSyncResult(attempted=True, ok=False, detail=detail)
+
+    def connection(self, session_id: str) -> dict[str, Any] | None:
+        return self.database.get_google_connection(session_id)
+
+    def _set_error(self, session_id: str, error: str | None) -> None:
+        self.database.set_google_connection_error(session_id, error)
 
     def _valid_access_token(self, session_id: str, connection: dict[str, Any]) -> str:
         expires_at = datetime.fromisoformat(str(connection["expires_at"]))
