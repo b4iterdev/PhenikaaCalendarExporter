@@ -36,7 +36,9 @@ class GoogleLoginService(GoogleCalendarService):
     def verify_identity(self, id_token: str, nonce: str) -> dict[str, Any]:
         key = PyJWKClient("https://www.googleapis.com/oauth2/v3/certs").get_signing_key_from_jwt(id_token)
         claims = jwt.decode(id_token, key.key, algorithms=["RS256"], audience=self.config.client_id,
-                            issuer=GOOGLE_ISSUERS, options={"require": ["iss", "aud", "sub", "exp", "iat", "nonce"]})
+                            options={"require": ["iss", "aud", "sub", "exp", "iat", "nonce"]})
+        if str(claims["iss"]) not in GOOGLE_ISSUERS:
+            raise GoogleCalendarError("Google issuer did not match")
         if not hmac.compare_digest(str(claims["nonce"]), nonce):
             raise GoogleCalendarError("Google nonce did not match")
         if claims.get("azp", self.config.client_id) != self.config.client_id:
