@@ -2,9 +2,9 @@
 
 [Back to the README](../README.md)
 
-Server mode keeps one Phenikaa account session per OIDC-authenticated user, encrypts captured JWTs in SQLite, refreshes tokens through the retained portal cookies, and writes that session's JSON and ICS exports.
+Server mode keeps one Phenikaa account session per authenticated user, encrypts captured JWTs in SQLite, refreshes tokens through the retained portal cookies, and writes that session's JSON and ICS exports. App login can use an external OIDC provider (default) or Google directly.
 
-The public home page introduces the service and links to the configured OIDC login. After login, the dashboard also offers a one-shot export that does not create a Phenikaa server session or use Google Calendar.
+The public home page offers one-shot export and links to the configured login. After login, the dashboard manages retained Phenikaa sessions and Google Calendar sync.
 
 ## Configuration
 
@@ -32,6 +32,34 @@ Set `PHENIKAA_POLICY_CONTACT` to the operator contact shown on the public Privac
 ${PHENIKAA_SERVER_BASE_URL}/privacy
 ${PHENIKAA_SERVER_BASE_URL}/terms
 ```
+
+## Google login mode
+
+Set `PHENIKAA_SERVER_AUTH=google` to use Google for both app sign-in and the Calendar destination. The existing `oidc` mode remains the default; `disabled` is for local development only. Unknown auth modes are rejected at startup.
+
+Configure a Google **Web application** OAuth client, enable the Google Calendar API, and register the exact callback below. Keep the server encryption key and state volume stable, and serve the application over HTTPS (session cookies are Secure).
+
+```bash
+export PHENIKAA_SERVER_AUTH="google"
+export PHENIKAA_SERVER_BASE_URL="https://calendar.example.edu"
+export PHENIKAA_GOOGLE_CLIENT_ID="...apps.googleusercontent.com"
+export PHENIKAA_GOOGLE_CLIENT_SECRET="..."
+export PHENIKAA_GOOGLE_REDIRECT_URI="${PHENIKAA_SERVER_BASE_URL}/auth/google/callback"
+# Keep your existing PHENIKAA_SERVER_KEY and PHENIKAA_POLICY_CONTACT settings.
+phenikaa-calendar-server --host 127.0.0.1 --port 8416
+```
+
+No `PHENIKAA_OIDC_*` settings are required in this mode. For Docker, add `-e PHENIKAA_SERVER_AUTH=google` to the example below and omit the three OIDC settings.
+
+The user selects **Sign in with Google**, grants Calendar permission, and then connects their Phenikaa account. The destination is automatically the **same Google account**, with events in the dedicated **Phenikaa Learning Calendar**, not the primary calendar. No separate Google connection step is needed when permission and offline access were granted. Google authentication still uses OAuth/OIDC, but no separate identity-provider deployment is required.
+
+The combined authorization requests `openid email profile` and `https://www.googleapis.com/auth/calendar.app.created`, with offline access. Calendar permission can be declined without preventing app login; the dashboard then shows **Authorize Google Calendar**. The same action recovers missing refresh credentials or revoked access. Reauthorization checks the verified Google subject, not just email or an account-picker hint. Ordinary logins reuse existing refresh credentials and do not force a fresh consent screen.
+
+Google grants are encrypted and owned by the application user, so they exist before a Phenikaa session is created. **Pause calendar sync** does not revoke Google login, and **Resume calendar sync** resumes the saved destination. Signing out does not stop scheduled sync. Deleting a Phenikaa session removes its exports, profile, calendar state, and event links but retains the user-level Google grant; recreating a session can create a new dedicated calendar. Deleting the application account revokes its Google grant, including when no Phenikaa session exists, and removes the local account. Existing events/calendars are not deleted by account deletion.
+
+Existing OIDC identities and session-bound Google connections are not automatically linked or migrated by matching email. Switching an existing deployment to Google mode creates separate Google app accounts; existing OIDC data remains stored and is available again in OIDC mode. Use a separate state directory if you want isolated deployments.
+
+For external OAuth projects in **Testing**, refresh tokens with Calendar access generally expire after seven days. Configure publishing status and any verification required by Google before relying on unattended production sync. Users may still need to reauthorize if access is revoked or expires. See [Google's web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server).
 
 ## One-shot web export
 

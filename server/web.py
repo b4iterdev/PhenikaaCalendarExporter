@@ -29,6 +29,7 @@ from server.db import (
     STATUS_PENDING_LOGIN,
 )
 from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
+from server.google_login import GoogleLoginService
 from server.legal import privacy_policy_body, terms_body
 from server.login_broker import LoginBroker, validate_event
 from server.oidc import OidcClient, SignedSessions, new_authorization_state
@@ -96,6 +97,7 @@ class ServerApplication:
         self.sync_engine = sync_engine
         self.oidc = oidc
         self.google = google
+        self.google_login = google if config.auth_mode == "google" and isinstance(google, GoogleLoginService) else None
         self.calendar_exporter = calendar_exporter
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
@@ -134,13 +136,19 @@ class ServerApplication:
             self._html(handler, 200, self._layout("Terms of Service", terms_body(self.config.policy_contact)))
             return
         if path == "/auth/login":
-            self._start_oidc(handler)
+            if self.config.auth_mode == "google":
+                self._start_google_login(handler)
+            else:
+                self._start_oidc(handler)
             return
         if path == "/auth/callback":
             self._finish_oidc(handler, urllib.parse.parse_qs(parsed.query))
             return
         if path == "/auth/google/callback":
-            self._finish_google_oauth(handler, urllib.parse.parse_qs(parsed.query))
+            if self.config.auth_mode == "google":
+                self._finish_google_login(handler, urllib.parse.parse_qs(parsed.query))
+            else:
+                self._finish_google_oauth(handler, urllib.parse.parse_qs(parsed.query))
             return
         identity = self._identity(handler)
         if path in ("/", "/about"):
@@ -159,6 +167,9 @@ class ServerApplication:
             self._redirect(handler, "/auth/login")
             return
         user = self.database.get_or_create_user(str(identity["sub"]), str(identity.get("name") or identity["sub"]))
+        if path == "/auth/google/authorize" and self.google_login is not None:
+            self._start_google_login(handler, consent=True)
+            return
         if path == "/language":
             language = (urllib.parse.parse_qs(parsed.query).get("lang") or [""])[0]
             if language not in ("en", "vi"):
@@ -232,17 +243,47 @@ class ServerApplication:
         if path == "/auth/logout":
             self._redirect(handler, "/", clear_cookie=True)
             return
+        if path in ("/account/google/pause", "/account/google/resume") and self.google_login is not None:
+            sessions = self.database.list_sessions(int(user["id"]))
+            lock = self.broker.try_profile_lock(str(sessions[0]["id"])) if sessions else None
+            if sessions and lock is None:
+                self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                return
+            try:
+                self.database.set_google_user_sync(int(user["id"]), path.endswith("/resume"))
+            finally:
+                if lock is not None:
+                    lock.release()
+            if path.endswith("/resume"):
+                for session in sessions:
+                    if session["status"] == "active":
+                        self.sync_engine.request_sync(str(session["id"]))
+            self._redirect(handler, "/dashboard")
+            return
         if path == "/account/delete":
             if str(form.get("confirmation") or "") != "DELETE":
                 self._error(handler, 400, "type DELETE to confirm account deletion")
                 return
-            for session in self.database.list_sessions(int(user["id"])):
+            account_sessions = self.database.list_sessions(int(user["id"]))
+            if self.google_login is not None and not account_sessions:
+                try:
+                    self.google_login.revoke(int(user["id"]))
+                except Exception:
+                    self._error(handler, 502, "Google access revocation failed; retry account deletion")
+                    return
+            for session in account_sessions:
                 session_id = str(session["id"])
                 lock = self.broker.try_profile_lock(session_id)
                 if lock is None:
                     self._error(handler, 409, "session is busy; retry after login or sync finishes")
                     return
                 try:
+                    if self.google_login is not None:
+                        try:
+                            self.google_login.revoke(int(user["id"]))
+                        except Exception:
+                            self._error(handler, 502, "Google access revocation failed; retry account deletion")
+                            return
                     if self.google is not None and self.database.get_google_connection(session_id) is not None:
                         self.google.disconnect(session_id)
                     self.broker.delete_profile(session_id)
@@ -354,7 +395,68 @@ class ServerApplication:
         if self.config.auth_mode == "disabled":
             return {"sub": "local-development-user", "name": "Local user", "csrf": "development"}
         value = self._cookie(handler, APP_COOKIE)
-        return self.signed_sessions.verify(value) if value else None
+        identity = self.signed_sessions.verify(value) if value else None
+        if identity is not None:
+            if self.config.auth_mode == "google":
+                if identity.get("auth_mode") != "google":
+                    return None
+                user = self.database.find_user(str(identity.get("sub") or ""))
+                grant = self.database.get_google_user_grant(int(user["id"])) if user else None
+                if grant is None or grant["google_sub"] != identity.get("google_sub"):
+                    return None
+            elif identity.get("auth_mode") == "google":
+                return None
+            else:
+                user = self.database.find_user(str(identity.get("sub") or ""))
+                if user and self.database.get_google_user_grant(int(user["id"])) is not None:
+                    return None
+        return identity
+
+    def _start_google_login(self, handler: BaseHTTPRequestHandler, *, consent: bool = False) -> None:
+        if self.google_login is None:
+            self._error(handler, 503, "Google login is not configured")
+            return
+        identity = self._identity(handler)
+        if consent and identity is None:
+            self._error(handler, 401, "authentication required")
+            return
+        subject = str(identity["google_sub"]) if identity is not None else ""
+        state, nonce, verifier, challenge = new_authorization_state()
+        transaction = self.signed_sessions.create({
+            "purpose": "google_login", "state": state, "nonce": nonce, "verifier": verifier,
+            "expected_sub": subject,
+        }, lifetime=600)
+        self._redirect(handler, self.google_login.login_url(state, nonce, challenge, consent=consent, subject=subject),
+                       set_cookie=(GOOGLE_OAUTH_COOKIE, transaction, 600))
+
+    def _finish_google_login(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> None:
+        transaction = self.signed_sessions.verify(self._cookie(handler, GOOGLE_OAUTH_COOKIE) or "")
+        state = (query.get("state") or [""])[0]
+        code = (query.get("code") or [""])[0]
+        if (self.google_login is None or not transaction or transaction.get("purpose") != "google_login"
+                or not secrets.compare_digest(state, str(transaction.get("state") or ""))):
+            self._error(handler, 400, "invalid Google login callback", clear_cookie=GOOGLE_OAUTH_COOKIE)
+            return
+        if query.get("error") or not code:
+            self._error(handler, 400, "Google sign-in was cancelled or denied. Return to sign in and try again.", clear_cookie=GOOGLE_OAUTH_COOKIE)
+            return
+        expected_sub = str(transaction.get("expected_sub") or "")
+        identity = self._identity(handler)
+        if expected_sub and (identity is None or identity.get("google_sub") != expected_sub):
+            self._error(handler, 403, "Google login session changed; start again", clear_cookie=GOOGLE_OAUTH_COOKIE)
+            return
+        try:
+            claims = self.google_login.login(code, str(transaction["verifier"]), str(transaction["nonce"]), expected_sub=expected_sub)
+        except Exception:
+            self._error(handler, 502, "Google sign-in failed. For reauthorization, use the same Google account you signed in with.", clear_cookie=GOOGLE_OAUTH_COOKIE)
+            return
+        app_session = self.signed_sessions.create({**claims, "csrf": secrets.token_urlsafe(24)})
+        user = self.database.find_user(str(claims["sub"]))
+        if user is not None:
+            for session in self.database.list_sessions(int(user["id"])):
+                if session["status"] == "active":
+                    self.sync_engine.request_sync(str(session["id"]))
+        self._redirect(handler, "/dashboard", set_cookie=(APP_COOKIE, app_session, 8 * 60 * 60), clear_cookie=GOOGLE_OAUTH_COOKIE)
 
     def _start_oidc(self, handler: BaseHTTPRequestHandler) -> None:
         if self.config.auth_mode == "disabled":
@@ -371,6 +473,9 @@ class ServerApplication:
         self._redirect(handler, url, set_cookie=(OIDC_COOKIE, transaction, 600))
 
     def _finish_oidc(self, handler: BaseHTTPRequestHandler, query: dict[str, list[str]]) -> None:
+        if self.config.auth_mode != "oidc":
+            self._error(handler, 404, "OIDC login is not enabled")
+            return
         transaction = self.signed_sessions.verify(self._cookie(handler, OIDC_COOKIE) or "")
         state = (query.get("state") or [""])[0]
         code = (query.get("code") or [""])[0]
@@ -394,6 +499,9 @@ class ServerApplication:
         self._redirect(handler, "/", set_cookie=(APP_COOKIE, app_session, 8 * 60 * 60))
 
     def _start_google_oauth(self, handler: BaseHTTPRequestHandler, session: dict[str, Any]) -> None:
+        if self.google_login is not None:
+            self._start_google_login(handler, consent=True)
+            return
         if self.google is None:
             self._error(handler, 503, "Google Calendar is not configured")
             return
@@ -499,7 +607,7 @@ class ServerApplication:
             <div class="session-section"><h3>{'Khoảng thời gian lịch' if vi else 'Calendar range'}</h3><form class="range-form" method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
             <div class="field-group"><label>{text['from']} <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label><label>{text['to']} <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label></div>
             <button class="button button--primary">{'Lưu khoảng thời gian' if vi else 'Save date range'}</button></form></div>
-            {downloads}<div class="session-section"><h3>Google Calendar</h3><div class="integration">{google}</div></div></article>""")
+            {downloads}{f'<div class="session-section"><h3>Google Calendar</h3><div class="integration">{google}</div></div>' if self.google_login is None else ''}</article>""")
         start, end = academic_year_range()
         new_session_form = "" if rows else f"""
          <section class="setup-card"><p class="eyebrow">{'KẾT NỐI ĐẦU TIÊN' if vi else 'FIRST CONNECTION'}</p><h2>{'Phiên mới: kết nối tài khoản Phenikaa' if vi else 'New session: connect a Phenikaa account'}</h2><p>{'Chọn khoảng thời gian học tập, sau đó đăng nhập một lần. Máy chủ mã hóa và tự động theo dõi phiên của bạn.' if vi else 'Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.'}</p><form method="post" action="/sessions">
@@ -516,9 +624,10 @@ class ServerApplication:
         <div class=\"or\" aria-hidden=\"true\">{text['or']}</div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name=\"userId\" autocomplete=\"off\"></label><label>Token JWT<input type=\"password\" name=\"tokenJWT\" autocomplete=\"off\"></label><p class=\"hint\">{text['manual_hint']}</p></fieldset></div>
         <button class=\"button button--primary\" type=\"submit\">{text['export']}</button></form></section>"""
         export_form = ""
+        google_account = self._google_account_markup(int(user["id"]), csrf, language)
         body = f"""
         {self._navigation(user, identity, "dashboard", language)}
-         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']}</p></div></div>{export_form}{summary_markup}{new_session_form}
+         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']}</p></div></div>{export_form}{google_account}{summary_markup}{new_session_form}
          {''.join(rows) or f'<section class="empty-state"><p class="eyebrow">{"CHƯA CÓ NGUỒN HOẠT ĐỘNG" if vi else "NO ACTIVE SOURCE"}</p><h2>{"Không gian làm việc đã sẵn sàng." if vi else "Your workspace is ready."}</h2><p>{"Kết nối tài khoản Phenikaa ở trên để bắt đầu theo dõi và xuất lịch học của bạn." if vi else "Connect your Phenikaa account above to begin observing and exporting your academic calendar."}</p></section>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
 
@@ -655,7 +764,8 @@ class ServerApplication:
             csrf = html.escape(str(identity["csrf"]))
             account = f"<span>{html.escape(str(user['display_name']))}</span><a class=\"nav-link{' nav-link--active' if active == 'settings' else ''}\" href=\"/settings\">{settings_label}</a><form method=\"post\" action=\"/auth/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button class=\"text-button\">{sign_out}</button></form>"
         else:
-            account = f"<a class=\"button button--primary\" href=\"/auth/login\">{'Đăng nhập' if vi else 'Sign in'}</a>"
+            login_label = ('Đăng nhập bằng Google' if vi else 'Sign in with Google') if self.config.auth_mode == 'google' else ('Đăng nhập' if vi else 'Sign in')
+            account = f"<a class=\"button button--primary\" href=\"/auth/login\">{login_label}</a>"
         dashboard = f'<a class="nav-link{active_dashboard}" href="/dashboard">{dashboard_label}</a>' if user is not None else f'<a class="nav-link" href="/dashboard">{dashboard_label}</a>'
         return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}<a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
 
@@ -678,6 +788,8 @@ class ServerApplication:
         return ("Đồng bộ lần cuối: " if language == "vi" else "Last synced: ") + formatted
 
     def _google_status_markup(self, session_id: str, csrf: str, language: str = "en") -> str:
+        if self.google_login is not None:
+            return ""
         sid = html.escape(session_id)
         vi = language == "vi"
         if self.google is None:
@@ -689,6 +801,32 @@ class ServerApplication:
         error = f"<p>{last_error}</p>" if last_error else ""
         return f"""<p>Google Calendar: <strong>{'Đã kết nối' if vi else 'Connected'}</strong></p>{error}
             <form method="post" action="/sessions/{sid}/google/disconnect"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Ngắt kết nối Google' if vi else 'Disconnect Google'}</button></form>"""
+
+    def _google_account_markup(self, user_id: int, csrf: str, language: str) -> str:
+        if self.google_login is None:
+            return ""
+        vi = language == "vi"
+        grant = self.google_login.grant_status(user_id)
+        if grant is None:
+            return ""
+        email = html.escape(str(grant["email"] or grant["google_sub"]))
+        error = html.escape(str(grant.get("last_error") or ""))
+        ready = grant["ready"] and not error
+        enabled = grant["sync_enabled"]
+        status = ("Đã kết nối" if vi else "Connected") if ready else ("Cần cấp quyền" if vi else "Authorization needed")
+        if ready and not enabled:
+            status = "Đã tạm dừng" if vi else "Paused"
+        action = ""
+        if not ready:
+            label = "Cấp lại quyền Google Calendar" if vi else "Authorize Google Calendar"
+            action = f'<a class="button button--primary" href="/auth/google/authorize">{label}</a>'
+        else:
+            operation = "pause" if enabled else "resume"
+            label = ("Tạm dừng đồng bộ" if vi else "Pause calendar sync") if enabled else ("Tiếp tục đồng bộ" if vi else "Resume calendar sync")
+            action = f'<form method="post" action="/account/google/{operation}"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--quiet">{label}</button></form>'
+        description = "Lịch được đồng bộ vào tài khoản Google bạn dùng để đăng nhập." if vi else "Your calendar syncs to the same Google account you use to sign in."
+        next_step = "Đồng bộ bắt đầu khi tài khoản Phenikaa được kết nối. Đăng xuất không dừng đồng bộ." if vi else "Sync begins once your Phenikaa account is connected. Signing out does not stop sync."
+        return f'<section class="setup-card"><p class="eyebrow">Google Calendar</p><h2>{status}</h2><p><strong>{email}</strong></p><p>Phenikaa Learning Calendar</p><p>{description}</p><p>{next_step}</p>{f"<p>{error}</p>" if error else ""}<div class="action-row">{action}</div></section>'
 
     def _login_page(self, handler: BaseHTTPRequestHandler, session: dict[str, Any], identity: dict[str, Any]) -> None:
         sid = str(session["id"])

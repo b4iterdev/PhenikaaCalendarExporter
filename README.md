@@ -8,6 +8,8 @@ A reproducible command-line project that reads the authenticated Phenikaa studen
 
 Server mode can optionally connect a session to Google Calendar for one-way Phenikaa-to-Google sync into a dedicated app-created calendar; see [Server and Docker deployment](docs/SERVER.md).
 
+Use `PHENIKAA_SERVER_AUTH=google` for Google app login with the same account automatically used for Calendar sync. Users then only need to connect their Phenikaa account. External OIDC login remains available as the default mode; see [Google login setup](docs/SERVER.md#google-login-mode).
+
 The project does not store passwords or enter credentials on your behalf. It reads session data from your own authenticated browser.
 
 ## Requirements

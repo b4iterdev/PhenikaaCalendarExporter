@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS google_user_grants (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    google_sub TEXT UNIQUE NOT NULL,
+    email TEXT NOT NULL,
+    credentials_encrypted TEXT NOT NULL,
+    sync_enabled INTEGER NOT NULL DEFAULT 1,
+    last_error TEXT
+);
 CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -266,8 +274,30 @@ class Database:
         row = self._fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
         return dict(row) if row else None
 
+    def find_user(self, subject: str) -> dict[str, Any] | None:
+        row = self._fetchone("SELECT * FROM users WHERE oidc_sub = ?", (subject,))
+        return dict(row) if row else None
+
     def delete_user(self, user_id: int) -> None:
         self._write("DELETE FROM users WHERE id = ?", (user_id,))
+
+    def get_google_user_grant(self, user_id: int) -> dict[str, Any] | None:
+        row = self._fetchone("SELECT * FROM google_user_grants WHERE user_id = ?", (user_id,))
+        return dict(row) if row else None
+
+    def save_google_user_grant(self, user_id: int, google_sub: str, email: str, encrypted: str) -> None:
+        self._write(
+            "INSERT INTO google_user_grants (user_id, google_sub, email, credentials_encrypted) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET email = excluded.email, "
+            "credentials_encrypted = excluded.credentials_encrypted, last_error = NULL",
+            (user_id, google_sub, email, encrypted),
+        )
+
+    def set_google_user_sync(self, user_id: int, enabled: bool) -> None:
+        self._write("UPDATE google_user_grants SET sync_enabled = ? WHERE user_id = ?", (int(enabled), user_id))
+
+    def set_google_user_error(self, user_id: int, error: str | None) -> None:
+        self._write("UPDATE google_user_grants SET last_error = ? WHERE user_id = ?", (error, user_id))
 
     # -- sessions ------------------------------------------------------
 
