@@ -25,6 +25,7 @@ from server.db import (
     Database,
     GOOGLE_PRIMARY_CLEANUP_PENDING,
     OwnerSessionExistsError,
+    STATUS_DISABLED,
     STATUS_NEEDS_HUMAN,
     STATUS_PENDING_LOGIN,
 )
@@ -88,6 +89,7 @@ class ServerApplication:
         oidc: OidcClient | None,
         google: GoogleCalendarWebService | None = None,
         calendar_exporter: CalendarExporter = export_calendar_files,
+        profile_lock_timeout: float = 10.0,
     ) -> None:
         self.config = config
         self.database = database
@@ -99,6 +101,7 @@ class ServerApplication:
         self.google = google
         self.google_login = google if config.auth_mode == "google" and isinstance(google, GoogleLoginService) else None
         self.calendar_exporter = calendar_exporter
+        self.profile_lock_timeout = profile_lock_timeout
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         application = self
@@ -244,16 +247,12 @@ class ServerApplication:
             self._redirect(handler, "/", clear_cookie=True)
             return
         if path in ("/account/google/pause", "/account/google/resume") and self.google_login is not None:
+            # Pause/resume is a user-level database flag only; it never touches
+            # the browser profile, so it must not take the profile lock.
+            # Taking the lock here turned every in-flight sync/login into a
+            # 409 for a purely self-service setting.
             sessions = self.database.list_sessions(int(user["id"]))
-            lock = self.broker.try_profile_lock(str(sessions[0]["id"])) if sessions else None
-            if sessions and lock is None:
-                self._error(handler, 409, "session is busy; retry after login or sync finishes")
-                return
-            try:
-                self.database.set_google_user_sync(int(user["id"]), path.endswith("/resume"))
-            finally:
-                if lock is not None:
-                    lock.release()
+            self.database.set_google_user_sync(int(user["id"]), path.endswith("/resume"))
             if path.endswith("/resume"):
                 for session in sessions:
                     if session["status"] == "active":
@@ -273,9 +272,20 @@ class ServerApplication:
                     return
             for session in account_sessions:
                 session_id = str(session["id"])
-                lock = self.broker.try_profile_lock(session_id)
+                # Disable first so the scheduler stops picking this session up
+                # while we wait for any in-flight sync/login to release it.
+                self.broker.forget_attempt(session_id)
+                try:
+                    self.database.update_session_status(session_id, STATUS_DISABLED)
+                except (KeyError, ValueError):
+                    pass
+                lock = self._acquire_profile_lock(session_id)
                 if lock is None:
-                    self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                    self._error(
+                        handler, 409,
+                        "session is busy (sync or login in progress);"
+                        " close the login tab if one is open and retry account deletion",
+                    )
                     return
                 try:
                     if self.google_login is not None:
@@ -356,9 +366,20 @@ class ServerApplication:
                 return
             if action == "delete":
                 session_id = str(session["id"])
-                lock = self.broker.try_profile_lock(session_id)
+                # Drop any stale streamed-login bookkeeping, then disable so
+                # scheduled syncs stop re-acquiring the profile while we wait.
+                self.broker.forget_attempt(session_id)
+                try:
+                    self.database.update_session_status(session_id, STATUS_DISABLED)
+                except (KeyError, ValueError):
+                    pass
+                lock = self._acquire_profile_lock(session_id)
                 if lock is None:
-                    self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                    self._error(
+                        handler, 409,
+                        "session is busy (sync or login in progress);"
+                        " close the login tab if one is open and retry deletion",
+                    )
                     return
                 try:
                     self.broker.delete_profile(session_id)
@@ -376,9 +397,13 @@ class ServerApplication:
             if self.google is None:
                 self._error(handler, 503, "Google Calendar is not configured")
                 return
-            lock = self.broker.try_profile_lock(str(session["id"]))
+            lock = self._acquire_profile_lock(str(session["id"]))
             if lock is None:
-                self._error(handler, 409, "session is busy; retry after login or sync finishes")
+                self._error(
+                    handler, 409,
+                    "session is busy (sync or login in progress);"
+                    " close the login tab if one is open and retry disconnect",
+                )
                 return
             try:
                 self.google.disconnect(str(session["id"]))
@@ -908,6 +933,22 @@ class ServerApplication:
             self._error(handler, 404, "session not found")
             return None
         return session
+
+    def _acquire_profile_lock(self, session_id: str) -> Any | None:
+        """Wait briefly for an in-flight sync/login instead of failing fast.
+
+        Returns the acquired lock (caller must release it) or None if the
+        profile stayed busy past ``profile_lock_timeout``. A short blocking
+        wait keeps self-service deletes/disconnects usable when they race a
+        sync that is just finishing, without hanging workers on stuck logins.
+        """
+        fast = self.broker.try_profile_lock(session_id)
+        if fast is not None:
+            return fast
+        timeout = max(0.0, float(getattr(self, "profile_lock_timeout", 10.0)))
+        if timeout <= 0:
+            return None
+        return self.broker.try_profile_lock(session_id, blocking=True, timeout=timeout)
 
     def _csrf_valid(self, handler: BaseHTTPRequestHandler, identity: dict[str, Any], form: dict[str, str]) -> bool:
         supplied = handler.headers.get("X-CSRF-Token") or form.get("csrf") or ""

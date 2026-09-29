@@ -58,7 +58,7 @@ class RecordingSync:
 
 
 class WebSmokeTests(unittest.TestCase):
-    def _start_app(self, directory, *, auth_mode="disabled", google=None, locks=None, calendar_exporter=None):
+    def _start_app(self, directory, *, auth_mode="disabled", google=None, locks=None, calendar_exporter=None, profile_lock_timeout=10.0):
         config = ServerConfig(state_dir=Path(directory), host="127.0.0.1", port=0, auth_mode=auth_mode)
         config.ensure_dirs()
         database = Database(config.db_path)
@@ -67,7 +67,7 @@ class WebSmokeTests(unittest.TestCase):
         broker = LoginBroker(config, locks=locks or ProfileLocks())
         sync = RecordingSync()
         options = {"calendar_exporter": calendar_exporter} if calendar_exporter is not None else {}
-        app = ServerApplication(config, database, vault, signed_sessions, broker, sync, None, google, **options)
+        app = ServerApplication(config, database, vault, signed_sessions, broker, sync, None, google, profile_lock_timeout=profile_lock_timeout, **options)
         server = make_server(app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -150,7 +150,7 @@ class WebSmokeTests(unittest.TestCase):
             locks = ProfileLocks()
             sync = SyncEngine(config, database, vault, locks=locks, fetcher=lambda *_args: [])
             broker = LoginBroker(config, locks=locks)
-            app = ServerApplication(config, database, vault, SignedSessions(b"x" * 32), broker, sync, None)
+            app = ServerApplication(config, database, vault, SignedSessions(b"x" * 32), broker, sync, None, profile_lock_timeout=0)
             server = make_server(app)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -674,7 +674,7 @@ class WebSmokeTests(unittest.TestCase):
             locks = ProfileLocks()
             google = FakeGoogleService()
             _config, database, signed_sessions, _sync, server, thread = self._start_app(
-                directory, auth_mode="oidc", google=google, locks=locks
+                directory, auth_mode="oidc", google=google, locks=locks, profile_lock_timeout=0
             )
             profile_lock = None
             lock_held = False
@@ -699,6 +699,87 @@ class WebSmokeTests(unittest.TestCase):
             finally:
                 if lock_held and profile_lock is not None:
                     profile_lock.release()
+                self._stop_app(database, server, thread)
+
+    def test_session_delete_waits_for_transient_profile_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            locks = ProfileLocks()
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(
+                directory, locks=locks, profile_lock_timeout=5.0
+            )
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                profile_lock = locks.for_profile(session_id)
+                acquired = threading.Event()
+
+                def hold_lock() -> None:
+                    profile_lock.acquire()
+                    acquired.set()
+                    try:
+                        time.sleep(0.5)
+                    finally:
+                        profile_lock.release()
+
+                holder = threading.Thread(target=hold_lock, daemon=True)
+                holder.start()
+                self.assertTrue(acquired.wait(5))
+                result: list = []
+                delete_body = urllib.parse.urlencode({"csrf": "development"})
+                connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+                try:
+                    connection.request(
+                        "POST", f"/sessions/{session_id}/delete", body=delete_body,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                    response = connection.getresponse()
+                    result.append(response.status)
+                    response.read()
+                finally:
+                    connection.close()
+                holder.join(5)
+                self.assertEqual(result, [303])
+                self.assertIsNone(database.get_session(session_id))
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_google_disconnect_waits_for_transient_profile_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            locks = ProfileLocks()
+            google = FakeGoogleService()
+            _config, database, signed_sessions, _sync, server, thread = self._start_app(
+                directory, auth_mode="oidc", google=google, locks=locks, profile_lock_timeout=5.0
+            )
+            try:
+                user = database.get_or_create_user("subject", "User")
+                session_id = database.create_session(user["id"])
+                app_cookie = self._app_cookie(signed_sessions)
+                body = urllib.parse.urlencode({"csrf": "csrf-token"})
+                profile_lock = locks.for_profile(session_id)
+                acquired = threading.Event()
+
+                def hold_lock() -> None:
+                    profile_lock.acquire()
+                    acquired.set()
+                    try:
+                        time.sleep(0.5)
+                    finally:
+                        profile_lock.release()
+
+                holder = threading.Thread(target=hold_lock, daemon=True)
+                holder.start()
+                self.assertTrue(acquired.wait(5))
+                status, _headers, _payload = self._request(
+                    server,
+                    "POST",
+                    f"/sessions/{session_id}/google/disconnect",
+                    body=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded", "Cookie": f"phenikaa_server_session={app_cookie}"},
+                )
+                holder.join(5)
+                self.assertEqual(status, 303)
+                self.assertEqual(google.disconnects, [session_id])
+            finally:
                 self._stop_app(database, server, thread)
 
     def test_google_dashboard_states_absent_connected_error_and_no_token_leakage(self):

@@ -75,7 +75,7 @@ class GoogleLoginTests(unittest.TestCase):
                                           self.db, self.vault, http_request=self.http)
         self.cookies = {}
         self.signed = SignedSessions(b"x" * 32)
-        self.app = ServerApplication(self.config, self.db, self.vault, self.signed, LoginBroker(self.config), RecordingSync(), None, self.service)
+        self.app = ServerApplication(self.config, self.db, self.vault, self.signed, LoginBroker(self.config), RecordingSync(), None, self.service, profile_lock_timeout=0)
         self.server = make_server(self.app)
         self.addCleanup(self.server.server_close)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -326,6 +326,22 @@ class GoogleLoginTests(unittest.TestCase):
             self.assertEqual(result[0], 409)
             self.assertEqual(len(self.calls), before)
             self.assertIsNotNone(self.db.get_user(user["id"]))
+        finally:
+            lock.release()
+
+    def test_pause_succeeds_while_profile_lock_held(self):
+        self.start_web()
+        self.web_login()
+        user = self.db.find_user("google:alice")
+        assert user is not None
+        sid = self.db.create_session(user["id"])
+        lock = self.app.broker.try_profile_lock(sid)
+        assert lock is not None
+        try:
+            status, location, _ = self.request("/account/google/pause", form={"csrf": self.csrf()})
+            self.assertEqual(status, 303)
+            self.assertEqual(location, "/dashboard")
+            self.assertIn("Paused", self.request("/dashboard")[2])
         finally:
             lock.release()
 
