@@ -1,6 +1,10 @@
 # Server and Docker Deployment
 
-[Back to the README](../README.md)
+> 💡 **Looking for the new modular documentation?**
+> - 🇬🇧 **[English Docs Hub](en/README.md)**: [Server & Docker Deployment](en/developer/server-deployment.md) · [Google Calendar Sync](en/user/google-calendar-sync.md)
+> - 🇻🇳 **[Tài Liệu Tiếng Việt](vi/README.md)**: [Triển Khai Server & Docker](vi/developer/server-deployment.md) · [Đồng Bộ Google Calendar](vi/user/google-calendar-sync.md)
+
+[Back to the README](../README.md) · [Documentation Hub](README.md)
 
 Server mode keeps one Phenikaa account session per authenticated user, encrypts captured JWTs in SQLite, refreshes tokens through the retained portal cookies, and writes that session's JSON and ICS exports. App login can use an external OIDC provider (default) or Google directly.
 

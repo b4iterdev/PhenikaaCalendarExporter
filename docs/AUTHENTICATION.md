@@ -1,6 +1,10 @@
 # Authentication
 
-[Back to the README](../README.md)
+> 💡 **Looking for the new modular documentation?**
+> - 🇬🇧 **[English Docs Hub](en/README.md)**: [Auth Internals & XOR Cipher](en/developer/authentication-internals.md) · [CLI Auth Options](en/developer/cli-reference.md)
+> - 🇻🇳 **[Tài Liệu Tiếng Việt](vi/README.md)**: [Cơ Chế Xác Thực & Mã Hóa](vi/developer/authentication-internals.md) · [Tùy Chọn Xác Thực CLI](vi/developer/cli-reference.md)
+
+[Back to the README](../README.md) · [Documentation Hub](README.md)
 
 The exporter never stores passwords. It reads session data produced by your own authenticated Phenikaa portal session. Choose exactly one authentication source.
 

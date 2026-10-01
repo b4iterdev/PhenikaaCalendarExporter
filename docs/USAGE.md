@@ -1,6 +1,10 @@
 # Usage
 
-[Back to the README](../README.md)
+> 💡 **Looking for the new modular documentation?**
+> - 🇬🇧 **[English Docs Hub](en/README.md)**: [User Guide](en/user/getting-started.md) · [Web Portal](en/user/web-portal.md) · [CLI Reference](en/developer/cli-reference.md)
+> - 🇻🇳 **[Tài Liệu Tiếng Việt](vi/README.md)**: [Hướng Dẫn Người Dùng](vi/user/getting-started.md) · [Giao Diện Web](vi/user/web-portal.md) · [Tham Chiếu CLI](vi/developer/cli-reference.md)
+
+[Back to the README](../README.md) · [Documentation Hub](README.md)
 
 ## Quick start
 

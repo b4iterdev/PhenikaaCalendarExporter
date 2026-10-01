@@ -34,12 +34,18 @@ Without installation, invoke `python phenikaa_exporter.py ...` directly.
 
 ## Documentation
 
-- [Usage and CLI reference](docs/USAGE.md)
-- [Authentication methods](docs/AUTHENTICATION.md)
-- [Server and Docker deployment](docs/SERVER.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Internal API protocol](docs/API_PROTOCOL.md)
-- [Security guidance](SECURITY.md)
+Comprehensive, modular documentation tailored for both **end users** (students & lecturers) and **developers**:
+
+- 📖 **[Documentation Hub](docs/README.md)** (Central index with language switcher)
+- 🇬🇧 **[English Documentation](docs/en/README.md)**:
+  - 👤 **User Guides**: [Getting Started](docs/en/user/getting-started.md) · [Web Portal](docs/en/user/web-portal.md) · [Google Calendar Sync](docs/en/user/google-calendar-sync.md) · [Importing Calendars](docs/en/user/importing-calendars.md) · [Export Formats](docs/en/user/exports-and-formats.md)
+  - 💻 **Developer Guides**: [Architecture](docs/en/developer/architecture.md) · [CLI Reference](docs/en/developer/cli-reference.md) · [Auth Internals](docs/en/developer/authentication-internals.md) · [API Protocol](docs/en/developer/api-protocol.md) · [Server & Docker](docs/en/developer/server-deployment.md) · [Testing & Contributing](docs/en/developer/testing-and-contributing.md)
+  - ❓ [Troubleshooting & FAQ](docs/en/troubleshooting.md)
+- 🇻🇳 **[Tài Liệu Tiếng Việt](docs/vi/README.md)**:
+  - 👤 **Hướng dẫn Người dùng**: [Bắt đầu nhanh](docs/vi/user/getting-started.md) · [Cổng Web](docs/vi/user/web-portal.md) · [Đồng bộ Google](docs/vi/user/google-calendar-sync.md) · [Nhập file .ics](docs/vi/user/importing-calendars.md) · [Tìm hiểu các file xuất](docs/vi/user/exports-and-formats.md)
+  - 💻 **Hướng dẫn Lập trình viên**: [Kiến trúc](docs/vi/developer/architecture.md) · [Tham chiếu CLI](docs/vi/developer/cli-reference.md) · [Cơ chế xác thực](docs/vi/developer/authentication-internals.md) · [Giao thức API](docs/vi/developer/api-protocol.md) · [Triển khai Server & Docker](docs/vi/developer/server-deployment.md) · [Kiểm thử](docs/vi/developer/testing-and-contributing.md)
+  - ❓ [Xử lý sự cố](docs/vi/troubleshooting.md)
+- 🛡️ [Security guidance](SECURITY.md)
 
 ## Tests
 

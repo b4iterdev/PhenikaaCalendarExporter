@@ -1,6 +1,10 @@
 # Phenikaa calendar API protocol
 
-[Back to the README](../README.md) · [Authentication methods](AUTHENTICATION.md)
+> 💡 **Looking for the new modular documentation?**
+> - 🇬🇧 **[English API Protocol Specification](en/developer/api-protocol.md)**
+> - 🇻🇳 **[Đặc Tả Giao Thức API Nội Bộ Tiếng Việt](vi/developer/api-protocol.md)**
+
+[Back to the README](../README.md) · [Documentation Hub](README.md) · [Authentication methods](AUTHENTICATION.md)
 
 This document records the behavior reverse-engineered from the portal's own JavaScript on 26 August 2026. It is an internal API, not a published public contract, so paths, action names and encoding may change.
 

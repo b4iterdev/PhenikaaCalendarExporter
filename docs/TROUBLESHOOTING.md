@@ -1,6 +1,10 @@
 # Troubleshooting
 
-[Back to the README](../README.md) · [Authentication guide](AUTHENTICATION.md) · [Usage guide](USAGE.md)
+> 💡 **Looking for the new modular documentation?**
+> - 🇬🇧 **[English Troubleshooting & FAQ](en/troubleshooting.md)**
+> - 🇻🇳 **[Cẩm Nang Xử Lý Sự Cố Tiếng Việt](vi/troubleshooting.md)**
+
+[Back to the README](../README.md) · [Documentation Hub](README.md) · [Authentication guide](AUTHENTICATION.md) · [Usage guide](USAGE.md)
 
 ## Browser login problems
 
