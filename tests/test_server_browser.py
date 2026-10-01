@@ -21,6 +21,17 @@ class BrowserInputTests(unittest.TestCase):
         dispatch_event(cdp, {"type": "click", "x": 10.0, "y": 20.0})
         self.assertEqual([call[1]["type"] for call in cdp.calls], ["mousePressed", "mouseReleased"])
 
+        cdp_enter = Cdp()
+        dispatch_event(cdp_enter, {"type": "special", "key": "Enter"})
+        self.assertEqual(len(cdp_enter.calls), 2)
+        down_call, up_call = cdp_enter.calls
+        self.assertEqual(down_call[1]["type"], "keyDown")
+        self.assertEqual(down_call[1]["text"], "\r")
+        self.assertEqual(down_call[1]["unmodifiedText"], "\r")
+        self.assertEqual(down_call[1]["windowsVirtualKeyCode"], 13)
+        self.assertEqual(up_call[1]["type"], "keyUp")
+        self.assertNotIn("text", up_call[1])
+
 
 if __name__ == "__main__":
     unittest.main()

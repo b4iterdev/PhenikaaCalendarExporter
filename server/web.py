@@ -869,18 +869,90 @@ class ServerApplication:
 
         self.broker.start_login(sid, complete, failed)
         csrf = json.dumps(str(identity["csrf"]))
+        language = self._language(handler)
+        vi = language == "vi"
+        modal_title = "Lưu ý khi sử dụng cổng đăng nhập ảo hóa (Streamed)" if vi else "Streamed Sign-in Instructions"
+        guide_tooltip = "Lưu ý và hướng dẫn thao tác" if vi else "Streamed login instructions"
+        dismiss_label = "Đã hiểu" if vi else "Got it"
+        hint_label = "Lưu ý sử dụng & phím Enter (?)" if vi else "Stream tips & Enter key (?)"
+
+        item_enter_title = "1. Phím Enter không gửi form:" if vi else "1. Enter key does not submit form:"
+        item_enter_desc = "Giao diện truyền phát dạng video/canvas không nhận trực tiếp phím Enter để gửi form. Sau khi nhập xong mật khẩu, <strong>bắt buộc dùng chuột click nút 'Đăng nhập'</strong>." if vi else "The streamed display does not trigger form submission via the Enter key. After typing your password, <strong>click the 'Đăng nhập' (Sign In) button with your mouse</strong>."
+
+        item_focus_title = "2. Không gõ được phím (Mất tiêu điểm):" if vi else "2. Keystrokes not registering (Lost focus):"
+        item_focus_desc = "Nếu gõ không hiển thị ký tự, hãy click chuột trực tiếp vào khung hiển thị một lần để bàn phím nhận diện phiên làm việc từ xa." if vi else "If typing does not register, click directly inside the stream portal window once to focus."
+
+        item_ime_title = "3. Lỗi gõ tiếng Việt (Unikey / EVKey):" if vi else "3. Vietnamese input method (Unikey / EVKey):"
+        item_ime_desc = "Bộ gõ tiếng Việt có thể làm nuốt ký tự hoặc sai mật khẩu. Vui lòng chuyển sang <strong>chế độ tiếng Anh (ENG)</strong> trước khi nhập tài khoản/mật khẩu." if vi else "Vietnamese IME can drop characters or corrupt passwords. Please switch your IME to <strong>English mode (ENG)</strong> before typing."
+
+        item_paste_title = "4. Sao chép và dán (Ctrl+V):" if vi else "4. Copy and paste (Ctrl+V):"
+        item_paste_desc = "Không hỗ trợ dán phím tắt từ máy cá nhân vào luồng stream nếu bị chặn. Vui lòng nhập thủ công tài khoản và mật khẩu." if vi else "Direct clipboard shortcuts may not reach the remote session. Please type your credentials manually if pasting fails."
+
         body = f"""<main class="signin-shell">
         <section class="signin-console" aria-label="Phenikaa streamed sign-in">
-        <div class="signin-console__top"><span><span class="signin-kicker__dot"></span>Secure browser relay</span><span class="signin-console__lock">Private relay</span></div>
+        <div class="signin-console__top">
+          <span><span class="signin-kicker__dot"></span>Secure browser relay</span>
+          <div style="display:flex;align-items:center;gap:0.75rem;">
+            <button type="button" id="guide-trigger" class="signin-guide-btn" title="{guide_tooltip}" aria-label="{guide_tooltip}">?</button>
+            <span class="signin-console__lock">Private relay</span>
+          </div>
+        </div>
         <div class="signin-frame"><img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal"></div>
-        <div class="signin-console__bottom"><span id="status">Waiting for sign-in...</span><span class="signin-hint">Click the portal to focus</span></div>
-        </section></main><script>
+        <div class="signin-console__bottom">
+          <span id="status">Waiting for sign-in...</span>
+          <button type="button" id="guide-trigger-hint" class="signin-hint text-button" style="text-decoration:underline;cursor:pointer;">{hint_label}</button>
+        </div>
+        </section>
+        <div id="guide-modal" class="signin-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+          <div class="signin-modal__dialog">
+            <div class="signin-modal__header">
+              <h3 id="guide-title">{modal_title}</h3>
+              <button type="button" id="guide-close-x" class="signin-modal__close" aria-label="Close">&times;</button>
+            </div>
+            <div class="signin-modal__body">
+              <div class="signin-modal__item">
+                <strong style="color:hsl(var(--destructive));">{item_enter_title}</strong>
+                <p>{item_enter_desc}</p>
+              </div>
+              <div class="signin-modal__item">
+                <strong>{item_focus_title}</strong>
+                <p>{item_focus_desc}</p>
+              </div>
+              <div class="signin-modal__item">
+                <strong>{item_ime_title}</strong>
+                <p>{item_ime_desc}</p>
+              </div>
+              <div class="signin-modal__item">
+                <strong>{item_paste_title}</strong>
+                <p>{item_paste_desc}</p>
+              </div>
+            </div>
+            <div class="signin-modal__footer">
+              <button type="button" id="guide-close-btn" class="button button--primary">{dismiss_label}</button>
+            </div>
+          </div>
+        </div>
+        </main><script>
         const csrf={csrf}, img=document.getElementById('frame');
+        const guideModal=document.getElementById('guide-modal');
+        const openGuide=()=>{{guideModal.style.display='flex'}};
+        const closeGuide=()=>{{guideModal.style.display='none'}};
+        document.getElementById('guide-trigger').onclick=openGuide;
+        const hintBtn=document.getElementById('guide-trigger-hint');
+        if(hintBtn)hintBtn.onclick=openGuide;
+        document.getElementById('guide-close-x').onclick=closeGuide;
+        document.getElementById('guide-close-btn').onclick=closeGuide;
+        guideModal.onclick=e=>{{if(e.target===guideModal)closeGuide()}};
         function send(ev){{fetch('/sessions/{sid}/event',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify(ev)}})}}
         img.onclick=e=>{{const r=img.getBoundingClientRect();send({{type:'click',x:(e.clientX-r.left)*img.naturalWidth/r.width,y:(e.clientY-r.top)*img.naturalHeight/r.height}});img.focus()}};
-        document.onkeydown=e=>{{if(['Shift','Control','Alt','Meta','CapsLock'].includes(e.key))return;e.preventDefault();send(e.key.length===1?{{type:'char',key:e.key}}:{{type:'special',key:e.key}})}};
+        document.onkeydown=e=>{{
+          if(guideModal.style.display!=='none'){{if(e.key==='Escape')closeGuide();return;}}
+          if(['Shift','Control','Alt','Meta','CapsLock'].includes(e.key))return;
+          e.preventDefault();
+          send(e.key.length===1?{{type:'char',key:e.key}}:{{type:'special',key:e.key}});
+        }};
         document.onpaste=e=>{{const text=e.clipboardData.getData('text');if(text)send({{type:'insert',text}})}};
-         setInterval(async()=>{{const r=await fetch('/sessions/{sid}/status.json');const s=await r.json();document.getElementById('status').textContent=s.status;if(s.status==='active')location='/dashboard' }},1500);
+        setInterval(async()=>{{const r=await fetch('/sessions/{sid}/status.json');const s=await r.json();document.getElementById('status').textContent=s.status;if(s.status==='active')location='/dashboard' }},1500);
         </script>"""
         self._html(handler, 200, self._layout("Phenikaa sign-in", body), no_store=True)
 
