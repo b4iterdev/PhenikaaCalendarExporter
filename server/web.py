@@ -34,6 +34,7 @@ from server.google_login import GoogleLoginService
 from server.legal import privacy_policy_body, terms_body
 from server.login_broker import LoginBroker, validate_event
 from server.oidc import OidcClient, SignedSessions, new_authorization_state
+from server.status import StatusCollector
 
 APP_COOKIE = "phenikaa_server_session"
 OIDC_COOKIE = "phenikaa_oidc_transaction"
@@ -90,6 +91,7 @@ class ServerApplication:
         google: GoogleCalendarWebService | None = None,
         calendar_exporter: CalendarExporter = export_calendar_files,
         profile_lock_timeout: float = 10.0,
+        status_collector: StatusCollector | None = None,
     ) -> None:
         self.config = config
         self.database = database
@@ -102,6 +104,7 @@ class ServerApplication:
         self.google_login = google if config.auth_mode == "google" and isinstance(google, GoogleLoginService) else None
         self.calendar_exporter = calendar_exporter
         self.profile_lock_timeout = profile_lock_timeout
+        self.status_collector = status_collector or StatusCollector()
 
     def handler(self) -> type[BaseHTTPRequestHandler]:
         application = self
@@ -125,6 +128,10 @@ class ServerApplication:
         path = parsed.path
         if path == "/healthz":
             self._json(handler, 200, {"ok": True})
+            return
+        if path in ("/api/status", "/status.json"):
+            refresh = "refresh" in urllib.parse.parse_qs(parsed.query)
+            self._json(handler, 200, self._get_system_status(refresh=refresh))
             return
         if path == "/static/styles.css":
             self._stylesheet(handler)
@@ -154,14 +161,16 @@ class ServerApplication:
                 self._finish_google_oauth(handler, urllib.parse.parse_qs(parsed.query))
             return
         identity = self._identity(handler)
-        if path in ("/", "/about"):
+        if path in ("/", "/about", "/status"):
             user = self.database.get_or_create_user(
                 str(identity["sub"]), str(identity.get("name") or identity["sub"])
             ) if identity is not None else None
             if path == "/":
                 self._public_export(handler, user, identity)
-            else:
+            elif path == "/about":
                 self._about(handler, user, identity)
+            else:
+                self._server_status(handler, user, identity, refresh="refresh" in urllib.parse.parse_qs(parsed.query))
             return
         if identity is None:
             if path == "/dashboard":
@@ -179,7 +188,7 @@ class ServerApplication:
                 self._error(handler, 400, "unsupported language")
                 return
             target = (urllib.parse.parse_qs(parsed.query).get("return") or ["/"])[0]
-            if target not in ("/", "/dashboard", "/about", "/settings"):
+            if target not in ("/", "/dashboard", "/about", "/settings", "/status"):
                 target = "/"
             self._redirect_language(handler, target, language)
             return
@@ -652,7 +661,7 @@ class ServerApplication:
         google_account = self._google_account_markup(int(user["id"]), csrf, language)
         body = f"""
         {self._navigation(user, identity, "dashboard", language)}
-         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']}</p></div></div>{export_form}{google_account}{summary_markup}{new_session_form}
+         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']} · <a href="/status" style="text-decoration:underline;">{'Xem trạng thái máy chủ' if vi else 'View server status'}</a></p></div></div>{export_form}{google_account}{summary_markup}{new_session_form}
          {''.join(rows) or f'<section class="empty-state"><p class="eyebrow">{"CHƯA CÓ NGUỒN HOẠT ĐỘNG" if vi else "NO ACTIVE SOURCE"}</p><h2>{"Không gian làm việc đã sẵn sàng." if vi else "Your workspace is ready."}</h2><p>{"Kết nối tài khoản Phenikaa ở trên để bắt đầu theo dõi và xuất lịch học của bạn." if vi else "Connect your Phenikaa account above to begin observing and exporting your academic calendar."}</p></section>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
 
@@ -700,6 +709,166 @@ class ServerApplication:
         vi = language == "vi"
         body = f"""{self._navigation(user, identity, "about", language)}<main><section class="landing-hero"><div><p class="eyebrow">ABOUT</p><h1>{'Lịch học của bạn, dễ mang theo.' if vi else 'Your timetable, made portable.'}</h1><p class="hero-lede">{'Phenikaa Calendar Exporter chuyển lịch học và lịch thi thành các file ICS, XLSX và JSON để bạn dùng ở nơi mình muốn.' if vi else 'Phenikaa Calendar Exporter turns your classes and exams into ICS, XLSX, and JSON files you can use wherever you work.'}</p></div></section><section class="feature-grid" aria-label="About the exporter"><article><span class="step">01</span><h2>{'Tạo file lịch nhanh' if vi else 'Quick export'}</h2><p>{'Không cần đăng nhập. Dùng file HTML đã xác thực hoặc userId và tokenJWT. Thông tin không được lưu.' if vi else 'No account required. Use a saved authenticated HTML page or userId and tokenJWT. Nothing is stored.'}</p></article><article><span class="step">02</span><h2>{'Bảng điều khiển' if vi else 'Dashboard'}</h2><p>{'Đăng nhập để giữ phiên Phenikaa, tự động đồng bộ và kết nối Google Calendar.' if vi else 'Sign in to keep a Phenikaa session, sync automatically, and connect Google Calendar.'}</p></article><article><span class="step">03</span><h2>{'Riêng tư' if vi else 'Privacy'}</h2><p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p></article></section></main>"""
         self._html(handler, 200, self._layout("About", body), no_store=True)
+
+    def _get_system_status(self, refresh: bool = False) -> dict[str, Any]:
+        system_details = {
+            "auth_mode": self.config.auth_mode,
+            "google_oauth": "configured" if self.config.google_oauth_configured else "not_configured",
+            "database": "connected",
+        }
+        return self.status_collector.get_status(force_refresh=refresh, include_system=system_details)
+
+    def _server_status(
+        self,
+        handler: BaseHTTPRequestHandler,
+        user: dict[str, Any] | None,
+        identity: dict[str, Any] | None,
+        refresh: bool = False,
+    ) -> None:
+        language = self._language(handler)
+        vi = language == "vi"
+        status_data = self._get_system_status(refresh=refresh)
+
+        phenikaa = status_data["services"]["phenikaa"]
+        google = status_data["services"]["google"]
+        system = status_data.get("system", {})
+        public_ip = html.escape(str(status_data.get("public_ip", "Unavailable")))
+        checked_at = html.escape(str(status_data.get("checked_at", "")))
+        overall_ok = bool(status_data.get("overall_ok"))
+
+        eyebrow = "TRẠNG THÁI HỆ THỐNG" if vi else "SYSTEM STATUS"
+        title = "Trạng thái máy chủ và dịch vụ" if vi else "Server & Service Status"
+        desc = (
+            "Kiểm tra trực tiếp kết nối và tính sẵn sàng của cổng trường Phenikaa, dịch vụ Google Calendar và hạ tầng máy chủ."
+            if vi else
+            "Live connectivity, response times, and health of Phenikaa student portal, Google Calendar service, and server infrastructure."
+        )
+        refresh_label = "Kiểm tra lại" if vi else "Refresh status"
+
+        if overall_ok:
+            banner_icon = "🟢"
+            banner_title = "Tất cả dịch vụ đang hoạt động bình thường" if vi else "All systems operational"
+            banner_desc = (
+                "Các kết nối tới Cổng sinh viên Phenikaa và Google API đều sẵn sàng."
+                if vi else
+                "Connectivity to Phenikaa student portal and Google Calendar API is healthy."
+            )
+            banner_style = "border-color:hsl(142 76% 36% / 0.3);background-color:hsl(142 76% 36% / 0.08);"
+        else:
+            banner_icon = "⚠️"
+            banner_title = "Phát hiện gián đoạn hoặc lỗi kết nối" if vi else "Service disruption detected"
+            banner_desc = (
+                "Một hoặc nhiều dịch vụ ngoại vi hiện không thể truy cập hoặc phản hồi chậm."
+                if vi else
+                "One or more external services are currently unreachable or experiencing issues."
+            )
+            banner_style = "border-color:hsl(var(--destructive) / 0.3);background-color:hsl(var(--destructive) / 0.08);"
+
+        # Phenikaa details
+        p_ok = phenikaa.get("ok")
+        p_status_cls = "status--operational" if p_ok else "status--unreachable"
+        p_status_text = ("Sẵn sàng" if vi else "Operational") if p_ok else ("Không thể kết nối" if vi else "Unreachable")
+        p_code = f"HTTP {phenikaa['code']}" if phenikaa.get("code") else ("Lỗi kết nối" if vi else "Connection error")
+        p_latency = f"{phenikaa.get('latency_ms', 0)} ms"
+        p_msg = html.escape(str(phenikaa.get("error") or phenikaa.get("message") or ""))
+
+        phenikaa_advisory = ""
+        if not p_ok:
+            notice_title = "Lưu ý tường lửa / Geoblock:" if vi else "Firewall / Geoblock Notice:"
+            notice_text = (
+                "Nếu cổng Phenikaa không phản hồi (timeout), địa chỉ IP của máy chủ có thể bị chặn bởi tường lửa FPT/Phenikaa. Hãy xoay IP công khai của máy chủ (OCI/VPS) hoặc thiết lập VPN ra ngoài tại Việt Nam."
+                if vi else
+                "If the Phenikaa portal times out, the server's public IP may be blocked by Phenikaa/FPT firewalls. Consider rotating your server public IP (e.g. on Oracle Cloud/VPS) or routing outbound traffic through a Vietnam gateway."
+            )
+            phenikaa_advisory = f"""
+            <div style="margin-top:0.75rem;padding:0.75rem;border-radius:0.75rem;background-color:hsl(var(--destructive) / 0.08);border:1px solid hsl(var(--destructive) / 0.2);font-size:12px;">
+              <strong style="color:hsl(var(--destructive));display:block;margin-bottom:0.25rem;">{notice_title}</strong>
+              <p style="margin:0;color:hsl(var(--muted-foreground));">{notice_text}</p>
+            </div>"""
+
+        # Google details
+        g_ok = google.get("ok")
+        g_status_cls = "status--operational" if g_ok else "status--unreachable"
+        g_status_text = ("Sẵn sàng" if vi else "Operational") if g_ok else ("Không thể kết nối" if vi else "Unreachable")
+        g_latency = f"{google.get('latency_ms', 0)} ms"
+        g_code = f"HTTP {google['code']}" if google.get("code") else ("Lỗi kết nối" if vi else "Connection error")
+        g_oauth_text = ("Đã cấu hình" if vi else "Configured") if self.config.google_oauth_configured else ("Chưa cấu hình" if vi else "Not configured")
+
+        # Infrastructure details
+        db_text = "Đã kết nối (SQLite WAL)" if vi else "Connected (SQLite WAL)"
+        auth_mode_text = self.config.auth_mode.upper()
+
+        body = f"""{self._navigation(user, identity, "status", language)}
+        <main>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">{eyebrow}</p>
+              <h2>{title}</h2>
+              <p class="page-description">{desc}</p>
+            </div>
+            <div class="action-row">
+              <a class="button button--quiet" href="/status?refresh=1">{refresh_label}</a>
+            </div>
+          </div>
+
+          <section style="{banner_style};border-width:1px;border-radius:1rem;padding:1.25rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:1rem;">
+            <span style="font-size:1.75rem;">{banner_icon}</span>
+            <div>
+              <h3 style="margin:0;font-size:1.125rem;font-weight:600;">{banner_title}</h3>
+              <p style="margin:0.25rem 0 0;font-size:0.875rem;color:hsl(var(--muted-foreground));">{banner_desc}</p>
+            </div>
+          </section>
+
+          <section class="summary-grid" style="margin-bottom:1.5rem;">
+            <article class="session-card" style="margin:0;">
+              <div class="session-card__head">
+                <div>
+                  <p class="eyebrow">PORTAL</p>
+                  <h3 style="margin:0;font-size:1.25rem;">{'Cổng sinh viên Phenikaa' if vi else 'Phenikaa Student Portal'}</h3>
+                </div>
+                <span class="status {p_status_cls}">{p_status_text}</span>
+              </div>
+              <div class="session-section" style="margin-top:1rem;padding-top:1rem;">
+                <p style="margin:0;font-size:0.875rem;"><strong>Host:</strong> <code>qldtbeta.phenikaa-uni.edu.vn</code></p>
+                <p style="margin:0.25rem 0;font-size:0.875rem;"><strong>{'Độ trễ' if vi else 'Latency'}:</strong> {p_latency} · {p_code}</p>
+                <p style="margin:0;font-size:0.75rem;color:hsl(var(--muted-foreground));">{p_msg}</p>
+                {phenikaa_advisory}
+              </div>
+            </article>
+
+            <article class="session-card" style="margin:0;">
+              <div class="session-card__head">
+                <div>
+                  <p class="eyebrow">GOOGLE</p>
+                  <h3 style="margin:0;font-size:1.25rem;">{'Dịch vụ Google Calendar' if vi else 'Google Calendar Service'}</h3>
+                </div>
+                <span class="status {g_status_cls}">{g_status_text}</span>
+              </div>
+              <div class="session-section" style="margin-top:1rem;padding-top:1rem;">
+                <p style="margin:0;font-size:0.875rem;"><strong>Host:</strong> <code>googleapis.com</code></p>
+                <p style="margin:0.25rem 0;font-size:0.875rem;"><strong>{'Độ trễ' if vi else 'Latency'}:</strong> {g_latency} · {g_code}</p>
+                <p style="margin:0.25rem 0 0;font-size:0.875rem;"><strong>OAuth:</strong> {g_oauth_text}</p>
+              </div>
+            </article>
+
+            <article class="session-card" style="margin:0;">
+              <div class="session-card__head">
+                <div>
+                  <p class="eyebrow">INFRASTRUCTURE</p>
+                  <h3 style="margin:0;font-size:1.25rem;">{'Hạ tầng máy chủ' if vi else 'Server Infrastructure'}</h3>
+                </div>
+                <span class="status status--operational">{'Bình thường' if vi else 'Healthy'}</span>
+              </div>
+              <div class="session-section" style="margin-top:1rem;padding-top:1rem;">
+                <p style="margin:0;font-size:0.875rem;"><strong>{'IP Egress máy chủ' if vi else 'Server Egress IP'}:</strong> <code>{public_ip}</code></p>
+                <p style="margin:0.25rem 0;font-size:0.875rem;"><strong>{'Cơ sở dữ liệu' if vi else 'Database'}:</strong> {db_text}</p>
+                <p style="margin:0.25rem 0;font-size:0.875rem;"><strong>{'Chế độ xác thực' if vi else 'Auth Mode'}:</strong> {auth_mode_text}</p>
+                <p style="margin:0.25rem 0 0;font-size:0.75rem;color:hsl(var(--muted-foreground));">{'Cập nhật lúc' if vi else 'Checked at'}: {checked_at}</p>
+              </div>
+            </article>
+          </section>
+        </main>"""
+        self._html(handler, 200, self._layout("Server status" if not vi else "Trạng thái máy chủ", body), no_store=True)
 
     def _export(self, handler: BaseHTTPRequestHandler, form: dict[str, str]) -> None:
         try:
@@ -776,13 +945,15 @@ class ServerApplication:
         vi = language == "vi"
         export_label = "Tạo lịch nhanh" if vi else "Quick export"
         dashboard_label = "Bảng điều khiển" if language == "vi" else "Dashboard"
+        status_label = "Trạng thái máy chủ" if vi else "Server status"
         settings_label = "Cài đặt" if language == "vi" else "Settings"
         sign_out = "Đăng xuất" if language == "vi" else "Sign out"
         about_label = "Giới thiệu" if vi else "About"
         active_export = " nav-link--active" if active == "export" else ""
         active_dashboard = " nav-link--active" if active == "dashboard" else ""
+        active_status = " nav-link--active" if active == "status" else ""
         active_settings = " nav-link--active" if active == "settings" else ""
-        target = {"export": "/", "dashboard": "/dashboard", "about": "/about", "settings": "/settings"}.get(active, "/")
+        target = {"export": "/", "dashboard": "/dashboard", "about": "/about", "settings": "/settings", "status": "/status"}.get(active, "/")
         language_links = f"<a class=\"language-option{' language-option--active' if language == 'vi' else ''}\" href=\"/language?lang=vi&return={urllib.parse.quote(target)}\">VI</a><a class=\"language-option{' language-option--active' if language == 'en' else ''}\" href=\"/language?lang=en&return={urllib.parse.quote(target)}\">EN</a>"
         account = ""
         if user is not None and identity is not None:
@@ -792,7 +963,7 @@ class ServerApplication:
             login_label = ('Đăng nhập bằng Google' if vi else 'Sign in with Google') if self.config.auth_mode == 'google' else ('Đăng nhập' if vi else 'Sign in')
             account = f"<a class=\"button button--primary\" href=\"/auth/login\">{login_label}</a>"
         dashboard = f'<a class="nav-link{active_dashboard}" href="/dashboard">{dashboard_label}</a>' if user is not None else f'<a class="nav-link" href="/dashboard">{dashboard_label}</a>'
-        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}<a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
+        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}<a class="nav-link{active_status}" href="/status">{status_label}</a><a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
 
     def _language(self, handler: BaseHTTPRequestHandler) -> str:
         return "vi" if self._cookie(handler, LANGUAGE_COOKIE) == "vi" else "en"
