@@ -21,7 +21,7 @@ from cryptography.fernet import Fernet
 import phenikaa_exporter as pe
 from server.config import ServerConfig
 from server.crypto import TokenVault
-from server.db import Database
+from server.db import Database, STATUS_ACTIVE, STATUS_PENDING_LOGIN
 from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
 from server.login_broker import LoginBroker
 from server.oidc import SignedSessions
@@ -141,6 +141,27 @@ class WebSmokeTests(unittest.TestCase):
             finally:
                 self._stop_app(database, server, thread)
 
+    def test_login_page_resets_active_status_to_pending_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            user = database.get_or_create_user("local-development-user", "Local user")
+            session_id = database.create_session(int(user["id"]))
+            try:
+                # Mark session as active
+                database.update_session_status(session_id, STATUS_ACTIVE)
+                # Verify it's active
+                self.assertEqual(database.get_session(session_id)["status"], STATUS_ACTIVE)
+                
+                with patch.object(LoginBroker, "start_login", return_value=None) as start_login:
+                    status, _headers, body = self._request(server, "GET", f"/sessions/{session_id}/login")
+                self.assertEqual(status, 200)
+                start_login.assert_called_once()
+                
+                # Verify session status was reset to pending_login
+                self.assertEqual(database.get_session(session_id)["status"], STATUS_PENDING_LOGIN)
+            finally:
+                self._stop_app(database, server, thread)
+
     def test_login_page_has_stream_guide_dialog_and_trigger(self):
         with tempfile.TemporaryDirectory() as directory:
             _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
@@ -151,6 +172,7 @@ class WebSmokeTests(unittest.TestCase):
                     status, _headers, body = self._request(server, "GET", f"/sessions/{session_id}/login")
                 self.assertEqual(status, 200)
                 self.assertIn(b'id="guide-trigger"', body)
+                self.assertNotIn(b'id="guide-trigger-hint"', body)
                 self.assertIn(b'class="signin-guide-btn"', body)
                 self.assertIn(b'id="guide-modal"', body)
                 self.assertIn(b"Enter", body)

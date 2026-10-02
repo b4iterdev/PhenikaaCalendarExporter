@@ -867,6 +867,7 @@ class ServerApplication:
             status = STATUS_PENDING_LOGIN if isinstance(error, LoginTimeout) else STATUS_NEEDS_HUMAN
             self.database.update_session_status(sid, status, str(error)[:160])
 
+        self.database.update_session_status(sid, STATUS_PENDING_LOGIN)
         self.broker.start_login(sid, complete, failed)
         csrf = json.dumps(str(identity["csrf"]))
         language = self._language(handler)
@@ -874,7 +875,6 @@ class ServerApplication:
         modal_title = "Lưu ý khi sử dụng cổng đăng nhập ảo hóa (Streamed)" if vi else "Streamed Sign-in Instructions"
         guide_tooltip = "Lưu ý và hướng dẫn thao tác" if vi else "Streamed login instructions"
         dismiss_label = "Đã hiểu" if vi else "Got it"
-        hint_label = "Lưu ý sử dụng & phím Enter (?)" if vi else "Stream tips & Enter key (?)"
 
         item_enter_title = "1. Phím Enter không gửi form:" if vi else "1. Enter key does not submit form:"
         item_enter_desc = "Giao diện truyền phát dạng video/canvas không nhận trực tiếp phím Enter để gửi form. Sau khi nhập xong mật khẩu, <strong>bắt buộc dùng chuột click nút 'Đăng nhập'</strong>." if vi else "The streamed display does not trigger form submission via the Enter key. After typing your password, <strong>click the 'Đăng nhập' (Sign In) button with your mouse</strong>."
@@ -900,7 +900,6 @@ class ServerApplication:
         <div class="signin-frame"><img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal"></div>
         <div class="signin-console__bottom">
           <span id="status">Waiting for sign-in...</span>
-          <button type="button" id="guide-trigger-hint" class="signin-hint text-button" style="text-decoration:underline;cursor:pointer;">{hint_label}</button>
         </div>
         </section>
         <div id="guide-modal" class="signin-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="guide-title">
@@ -938,8 +937,6 @@ class ServerApplication:
         const openGuide=()=>{{guideModal.style.display='flex'}};
         const closeGuide=()=>{{guideModal.style.display='none'}};
         document.getElementById('guide-trigger').onclick=openGuide;
-        const hintBtn=document.getElementById('guide-trigger-hint');
-        if(hintBtn)hintBtn.onclick=openGuide;
         document.getElementById('guide-close-x').onclick=closeGuide;
         document.getElementById('guide-close-btn').onclick=closeGuide;
         guideModal.onclick=e=>{{if(e.target===guideModal)closeGuide()}};
