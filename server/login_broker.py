@@ -84,14 +84,10 @@ def dispatch_event(cdp: Any, event: dict[str, Any]) -> None:
         key = event["key"]
         code = SPECIAL_KEYS[key]
         for action in ("keyDown", "keyUp"):
-            payload: dict[str, Any] = {
+            cdp.send("Input.dispatchKeyEvent", {
                 "type": action, "key": key, "code": key,
                 "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code,
-            }
-            if key == "Enter" and action == "keyDown":
-                payload["text"] = "\r"
-                payload["unmodifiedText"] = "\r"
-            cdp.send("Input.dispatchKeyEvent", payload)
+            })
     elif kind == "insert":
         cdp.send("Input.insertText", {"text": event["text"]})
 
