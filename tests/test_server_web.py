@@ -131,6 +131,8 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertIn(b"Phenikaa", body)
                 self.assertIn(b"Google", body)
                 self.assertIn(b"/status?refresh=1", body)
+                self.assertNotIn(b"Server Egress IP", body)
+                self.assertNotIn(b"IP Egress", body)
 
                 status_api, headers_api, body_api = self._request(server, "GET", "/api/status")
                 self.assertEqual(status_api, 200)
@@ -140,6 +142,7 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertIn("services", data)
                 self.assertIn("phenikaa", data["services"])
                 self.assertIn("google", data["services"])
+                self.assertNotIn("public_ip", data)
 
                 status_home, _headers_home, body_home = self._request(server, "GET", "/")
                 self.assertEqual(status_home, 200)

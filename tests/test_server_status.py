@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from server.status import StatusCollector, check_google_service, check_phenikaa_portal, check_public_ip
+from server.status import StatusCollector, check_google_service, check_phenikaa_portal
 
 
 class StatusCollectorTests(unittest.TestCase):
@@ -24,14 +24,13 @@ class StatusCollectorTests(unittest.TestCase):
             "latency_ms": 120,
             "message": "OK",
         }
-        mock_ip = lambda timeout: "1.2.3.4"
 
-        collector = StatusCollector(cache_ttl=10.0, probe_phenikaa=mock_p, probe_google=mock_g, probe_ip=mock_ip)
+        collector = StatusCollector(cache_ttl=10.0, probe_phenikaa=mock_p, probe_google=mock_g)
         res = collector.get_status(include_system={"db": "ok"})
 
         self.assertTrue(res["overall_ok"])
         self.assertEqual(res["overall_status"], "operational")
-        self.assertEqual(res["public_ip"], "1.2.3.4")
+        self.assertNotIn("public_ip", res)
         self.assertEqual(res["services"]["phenikaa"]["status"], "operational")
         self.assertEqual(res["services"]["google"]["status"], "operational")
         self.assertEqual(res["system"]["db"], "ok")
@@ -47,7 +46,7 @@ class StatusCollectorTests(unittest.TestCase):
             calls["g"] += 1
             return {"name": "Google", "ok": True, "status": "operational", "latency_ms": 10}
 
-        collector = StatusCollector(cache_ttl=60.0, probe_phenikaa=mock_p, probe_google=mock_g, probe_ip=lambda t: "5.6.7.8")
+        collector = StatusCollector(cache_ttl=60.0, probe_phenikaa=mock_p, probe_google=mock_g)
 
         # First call probes
         res1 = collector.get_status()
@@ -80,12 +79,12 @@ class StatusCollectorTests(unittest.TestCase):
             "latency_ms": 100,
         }
 
-        collector = StatusCollector(probe_phenikaa=mock_p_fail, probe_google=mock_g_ok, probe_ip=lambda t: None)
+        collector = StatusCollector(probe_phenikaa=mock_p_fail, probe_google=mock_g_ok)
         res = collector.get_status()
 
         self.assertFalse(res["overall_ok"])
         self.assertEqual(res["overall_status"], "degraded")
-        self.assertEqual(res["public_ip"], "Unavailable")
+        self.assertNotIn("public_ip", res)
         self.assertEqual(res["services"]["phenikaa"]["status"], "unreachable")
         self.assertEqual(res["services"]["google"]["status"], "operational")
 
@@ -97,7 +96,7 @@ class StatusCollectorTests(unittest.TestCase):
             "latency_ms": 4000,
             "error": "failed",
         }
-        collector2 = StatusCollector(probe_phenikaa=mock_p_fail, probe_google=mock_g_fail, probe_ip=lambda t: None)
+        collector2 = StatusCollector(probe_phenikaa=mock_p_fail, probe_google=mock_g_fail)
         res2 = collector2.get_status()
         self.assertFalse(res2["overall_ok"])
         self.assertEqual(res2["overall_status"], "major_outage")
