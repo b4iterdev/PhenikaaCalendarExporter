@@ -875,6 +875,9 @@ class ServerApplication:
         modal_title = "Lưu ý khi sử dụng cổng đăng nhập ảo hóa (Streamed)" if vi else "Streamed Sign-in Instructions"
         guide_tooltip = "Lưu ý và hướng dẫn thao tác" if vi else "Streamed login instructions"
         dismiss_label = "Đã hiểu" if vi else "Got it"
+        mobile_input_placeholder = "Nhập tài khoản / mật khẩu..." if vi else "Type username or password..."
+        mobile_send_label = "Gửi" if vi else "Send"
+        mobile_keyboard_label = "Bàn phím di động" if vi else "Mobile keyboard"
 
         item_enter_title = "1. Phím Enter không gửi form:" if vi else "1. Enter key does not submit form:"
         item_enter_desc = "Giao diện truyền phát dạng video/canvas không nhận trực tiếp phím Enter để gửi form. Sau khi nhập xong mật khẩu, <strong>bắt buộc dùng chuột click nút 'Đăng nhập'</strong>." if vi else "The streamed display does not trigger form submission via the Enter key. After typing your password, <strong>click the 'Đăng nhập' (Sign In) button with your mouse</strong>."
@@ -898,6 +901,12 @@ class ServerApplication:
           </div>
         </div>
         <div class="signin-frame"><img id="frame" src="/sessions/{sid}/stream" tabindex="0" alt="Phenikaa portal"></div>
+        <div class="signin-mobile-bar" aria-label="{mobile_keyboard_label}">
+          <input type="text" id="mobile-input" class="signin-mobile-input" placeholder="{mobile_input_placeholder}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <button type="button" id="mobile-send" class="signin-mobile-btn signin-mobile-btn--primary">{mobile_send_label}</button>
+          <button type="button" id="mobile-tab" class="signin-mobile-btn">Tab ⇥</button>
+          <button type="button" id="mobile-enter" class="signin-mobile-btn">Enter ↵</button>
+        </div>
         <div class="signin-console__bottom">
           <span id="status">Waiting for sign-in...</span>
         </div>
@@ -941,9 +950,39 @@ class ServerApplication:
         document.getElementById('guide-close-btn').onclick=closeGuide;
         guideModal.onclick=e=>{{if(e.target===guideModal)closeGuide()}};
         function send(ev){{fetch('/sessions/{sid}/event',{{method:'POST',headers:{{'Content-Type':'application/json','X-CSRF-Token':csrf}},body:JSON.stringify(ev)}})}}
-        img.onclick=e=>{{const r=img.getBoundingClientRect();send({{type:'click',x:(e.clientX-r.left)*img.naturalWidth/r.width,y:(e.clientY-r.top)*img.naturalHeight/r.height}});img.focus()}};
+        function sendClick(clientX, clientY){{
+          const r=img.getBoundingClientRect();
+          if(!r.width||!r.height)return;
+          send({{type:'click',x:(clientX-r.left)*img.naturalWidth/r.width,y:(clientY-r.top)*img.naturalHeight/r.height}});
+          img.focus();
+        }}
+        img.onclick=e=>sendClick(e.clientX, e.clientY);
+        img.addEventListener('touchend',e=>{{
+          if(e.changedTouches&&e.changedTouches.length>0){{
+            const t=e.changedTouches[0];
+            sendClick(t.clientX, t.clientY);
+          }}
+        }},{{passive:true}});
+        const mobileInput=document.getElementById('mobile-input');
+        const submitMobileInput=()=>{{
+          const val=mobileInput.value;
+          if(val){{
+            send({{type:'insert',text:val}});
+            mobileInput.value='';
+          }}
+        }};
+        document.getElementById('mobile-send').onclick=submitMobileInput;
+        mobileInput.onkeydown=e=>{{
+          if(e.key==='Enter'){{
+            e.preventDefault();
+            submitMobileInput();
+          }}
+        }};
+        document.getElementById('mobile-tab').onclick=()=>send({{type:'special',key:'Tab'}});
+        document.getElementById('mobile-enter').onclick=()=>send({{type:'special',key:'Enter'}});
         document.onkeydown=e=>{{
           if(guideModal.style.display!=='none'){{if(e.key==='Escape')closeGuide();return;}}
+          if(document.activeElement===mobileInput)return;
           if(['Shift','Control','Alt','Meta','CapsLock'].includes(e.key))return;
           e.preventDefault();
           send(e.key.length===1?{{type:'char',key:e.key}}:{{type:'special',key:e.key}});
@@ -960,7 +999,10 @@ class ServerApplication:
             return
         handler.send_response(200)
         handler.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.send_header("X-Accel-Buffering", "no")
         handler.end_headers()
         sequence = -1
         try:
@@ -1150,7 +1192,7 @@ class ServerApplication:
         body = text.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
-        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
         if no_store:
             handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(body)))

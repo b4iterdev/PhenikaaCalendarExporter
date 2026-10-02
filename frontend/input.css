@@ -265,6 +265,22 @@
     @apply text-accent;
   }
 
+  .signin-mobile-bar {
+    @apply mt-3 flex flex-wrap items-center gap-2 border-t border-primary-foreground/15 pt-3;
+  }
+
+  .signin-mobile-input {
+    @apply min-h-9 flex-1 min-w-[140px] rounded-lg border border-primary-foreground/20 bg-background/10 px-2.5 py-1.5 font-sans text-xs text-primary-foreground placeholder:text-primary-foreground/40;
+  }
+
+  .signin-mobile-btn {
+    @apply inline-flex min-h-9 items-center justify-center rounded-lg border border-primary-foreground/30 bg-primary-foreground/10 px-2.5 py-1.5 font-mono text-[11px] font-semibold text-primary-foreground transition-colors hover:border-accent hover:bg-accent hover:text-accent-foreground cursor-pointer;
+  }
+
+  .signin-mobile-btn--primary {
+    @apply border-accent bg-accent text-accent-foreground hover:bg-accent/90;
+  }
+
   #status {
     @apply truncate;
   }

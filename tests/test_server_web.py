@@ -180,6 +180,24 @@ class WebSmokeTests(unittest.TestCase):
             finally:
                 self._stop_app(database, server, thread)
 
+    def test_login_page_has_mobile_stream_input_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            user = database.get_or_create_user("local-development-user", "Local user")
+            session_id = database.create_session(int(user["id"]))
+            try:
+                with patch.object(LoginBroker, "start_login", return_value=None):
+                    status, _headers, body = self._request(server, "GET", f"/sessions/{session_id}/login")
+                self.assertEqual(status, 200)
+                self.assertIn(b'id="mobile-input"', body)
+                self.assertIn(b'id="mobile-send"', body)
+                self.assertIn(b'id="mobile-tab"', body)
+                self.assertIn(b'id="mobile-enter"', body)
+                self.assertIn(b'class="signin-mobile-bar"', body)
+                self.assertIn(b"touchend", body)
+            finally:
+                self._stop_app(database, server, thread)
+
     def test_disabled_auth_dashboard_and_session_creation(self):
         with tempfile.TemporaryDirectory() as directory:
             config = ServerConfig(state_dir=Path(directory), host="127.0.0.1", port=0, auth_mode="disabled")
