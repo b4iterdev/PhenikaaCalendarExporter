@@ -999,7 +999,10 @@ class ServerApplication:
             return
         handler.send_response(200)
         handler.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.send_header("X-Accel-Buffering", "no")
         handler.end_headers()
         sequence = -1
         try:
@@ -1189,7 +1192,7 @@ class ServerApplication:
         body = text.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
-        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+        handler.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
         if no_store:
             handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", str(len(body)))
