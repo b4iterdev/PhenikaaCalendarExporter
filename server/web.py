@@ -732,7 +732,6 @@ class ServerApplication:
         phenikaa = status_data["services"]["phenikaa"]
         google = status_data["services"]["google"]
         system = status_data.get("system", {})
-        public_ip = html.escape(str(status_data.get("public_ip", "Unavailable")))
         checked_at = html.escape(str(status_data.get("checked_at", "")))
         overall_ok = bool(status_data.get("overall_ok"))
 
@@ -860,7 +859,7 @@ class ServerApplication:
                 <span class="status status--operational">{'Bình thường' if vi else 'Healthy'}</span>
               </div>
               <div class="session-section" style="margin-top:1rem;padding-top:1rem;">
-                <p style="margin:0;font-size:0.875rem;"><strong>{'IP Egress máy chủ' if vi else 'Server Egress IP'}:</strong> <code>{public_ip}</code></p>
+                <p style="margin:0;font-size:0.875rem;"><strong>{'Kết nối ngoại vi' if vi else 'Network Egress'}:</strong> <span style="color:hsl(142 76% 36%);">{'Hoạt động' if overall_ok and vi else 'Operational' if overall_ok else 'Gián đoạn' if vi else 'Degraded'}</span></p>
                 <p style="margin:0.25rem 0;font-size:0.875rem;"><strong>{'Cơ sở dữ liệu' if vi else 'Database'}:</strong> {db_text}</p>
                 <p style="margin:0.25rem 0;font-size:0.875rem;"><strong>{'Chế độ xác thực' if vi else 'Auth Mode'}:</strong> {auth_mode_text}</p>
                 <p style="margin:0.25rem 0 0;font-size:0.75rem;color:hsl(var(--muted-foreground));">{'Cập nhật lúc' if vi else 'Checked at'}: {checked_at}</p>

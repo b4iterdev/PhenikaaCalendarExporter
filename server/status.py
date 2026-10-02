@@ -143,12 +143,10 @@ class StatusCollector:
         *,
         probe_phenikaa: Callable[[float], dict[str, Any]] = check_phenikaa_portal,
         probe_google: Callable[[float], dict[str, Any]] = check_google_service,
-        probe_ip: Callable[[float], str | None] = check_public_ip,
     ) -> None:
         self.cache_ttl = cache_ttl
         self._probe_phenikaa = probe_phenikaa
         self._probe_google = probe_google
-        self._probe_ip = probe_ip
         self._lock = threading.Lock()
         self._last_checked: float = 0.0
         self._cached_payload: dict[str, Any] | None = None
@@ -169,7 +167,6 @@ class StatusCollector:
 
             phenikaa = self._probe_phenikaa(DEFAULT_PROBE_TIMEOUT)
             google = self._probe_google(DEFAULT_PROBE_TIMEOUT)
-            public_ip = self._probe_ip(3.0)
 
             overall_ok = bool(phenikaa.get("ok")) and bool(google.get("ok"))
             overall_status = "operational" if overall_ok else ("degraded" if phenikaa.get("ok") or google.get("ok") else "major_outage")
@@ -178,7 +175,6 @@ class StatusCollector:
                 "overall_status": overall_status,
                 "overall_ok": overall_ok,
                 "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "public_ip": public_ip or "Unavailable",
                 "services": {
                     "phenikaa": phenikaa,
                     "google": google,
