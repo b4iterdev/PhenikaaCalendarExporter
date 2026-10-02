@@ -121,6 +121,32 @@ class WebSmokeTests(unittest.TestCase):
             finally:
                 self._stop_app(database, server, thread)
 
+    def test_server_status_page_and_json_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            try:
+                status, headers, body = self._request(server, "GET", "/status")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+                self.assertIn(b"Phenikaa", body)
+                self.assertIn(b"Google", body)
+                self.assertIn(b"/status?refresh=1", body)
+
+                status_api, headers_api, body_api = self._request(server, "GET", "/api/status")
+                self.assertEqual(status_api, 200)
+                self.assertEqual(headers_api["Content-Type"], "application/json")
+                data = json.loads(body_api.decode("utf-8"))
+                self.assertIn("overall_status", data)
+                self.assertIn("services", data)
+                self.assertIn("phenikaa", data["services"])
+                self.assertIn("google", data["services"])
+
+                status_home, _headers_home, body_home = self._request(server, "GET", "/")
+                self.assertEqual(status_home, 200)
+                self.assertIn(b'href="/status"', body_home)
+            finally:
+                self._stop_app(database, server, thread)
+
     def test_login_page_has_plain_stream_frame_without_corner_decoration(self):
         with tempfile.TemporaryDirectory() as directory:
             _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)

@@ -456,6 +456,18 @@
     @apply bg-destructive/10 text-destructive;
   }
 
+  .status--operational {
+    @apply bg-emerald-500/15 text-emerald-700;
+  }
+
+  .status--degraded {
+    @apply bg-amber-500/15 text-amber-700;
+  }
+
+  .status--unreachable {
+    @apply bg-destructive/15 text-destructive;
+  }
+
   .integration {
     @apply border-y py-4 text-sm text-muted-foreground;
   }
