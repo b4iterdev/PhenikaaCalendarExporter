@@ -15,6 +15,7 @@ from server.crypto import TokenVault
 from server.db import Database
 from server.google import (
     APP_PRIVATE_KEY,
+    CALENDAR_LIST_URL,
     CALENDARS_URL,
     APP_CREATED_SCOPE,
     EVENTS_BASE_URL,
@@ -24,6 +25,7 @@ from server.google import (
     REVOKE_URL,
     SCOPE,
     TOKEN_URL,
+    GoogleCalendarError,
     GoogleCalendarService,
     GoogleHttpResponse,
     GoogleOAuthConfig,
@@ -404,6 +406,94 @@ class GoogleCalendarTests(unittest.TestCase):
             self.assertEqual([call["method"] for call in http.calls], ["POST", "POST"])
             self.assertEqual(http.calls[0]["url"], CALENDARS_URL)
             self.assertNotIn("/primary", " ".join(call["url"] for call in http.calls))
+            database.close()
+
+    def _seed_app_calendar(self, database, vault, session_id, now, calendar_id="cal-123"):
+        database.upsert_google_connection(
+            session_id,
+            access_token_encrypted=vault.encrypt("access-live"),
+            refresh_token_encrypted=vault.encrypt("refresh-live"),
+            expires_at=(now + timedelta(hours=1)).isoformat(),
+            scope=SCOPE,
+        )
+        database.set_google_calendar_id(session_id, calendar_id)
+
+    def test_delete_app_calendar_uses_calendars_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+            http = FakeGoogleHttp()
+            http.push(204)
+            service, database, vault, session_id = self.make_service(directory, http, now=now)
+            self._seed_app_calendar(database, vault, session_id, now)
+            result = service.delete_app_calendar(session_id, "cal-123")
+            self.assertEqual(result, "deleted")
+            self.assertEqual([(call["method"], call["url"]) for call in http.calls],
+                             [("DELETE", calendar_url("cal-123"))])
+            self.assertIn("Bearer access-live", http.calls[0]["headers"]["Authorization"])
+            database.close()
+
+    def test_remove_from_list_uses_calendar_list_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+            http = FakeGoogleHttp()
+            http.push(204)
+            service, database, vault, session_id = self.make_service(directory, http, now=now)
+            self._seed_app_calendar(database, vault, session_id, now)
+            result = service.remove_from_list(session_id, "cal-123")
+            self.assertEqual(result, "removed")
+            self.assertEqual([(call["method"], call["url"]) for call in http.calls],
+                             [("DELETE", CALENDAR_LIST_URL + "/cal-123")])
+            database.close()
+
+    def test_delete_treats_404_as_already_gone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+            http = FakeGoogleHttp()
+            http.push(404, {"error": {"message": "Not Found"}})
+            http.push(404, {"error": {"message": "Not Found"}})
+            service, database, vault, session_id = self.make_service(directory, http, now=now)
+            self._seed_app_calendar(database, vault, session_id, now)
+            self.assertEqual(service.delete_app_calendar(session_id, "cal-123"), "already_gone")
+            self.assertEqual(service.remove_from_list(session_id, "cal-123"), "already_gone")
+            self.assertEqual(len(http.calls), 2)
+            database.close()
+
+    def test_delete_raises_on_server_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+            http = FakeGoogleHttp()
+            http.push(500, {"error": {"message": "Backend Error"}})
+            service, database, vault, session_id = self.make_service(directory, http, now=now)
+            self._seed_app_calendar(database, vault, session_id, now)
+            with self.assertRaises(GoogleCalendarError):
+                service.delete_app_calendar(session_id, "cal-123")
+            self.assertEqual(len(http.calls), 1)
+            database.close()
+
+    def test_delete_rejects_primary_calendar_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            http = FakeGoogleHttp()
+            service, database, _vault, session_id = self.make_service(directory, http)
+            with self.assertRaisesRegex(ValueError, "cannot be primary"):
+                service.delete_app_calendar(session_id, PRIMARY_CALENDAR_ID)
+            with self.assertRaisesRegex(ValueError, "cannot be primary"):
+                service.remove_from_list(session_id, "")
+            self.assertEqual(http.calls, [])
+            database.close()
+
+    def test_delete_retries_once_after_401_with_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+            http = FakeGoogleHttp()
+            http.push(401, {"error": {"message": "Invalid Credentials"}})
+            http.push(200, {"access_token": "access-fresh", "expires_in": 3600})
+            http.push(204)
+            service, database, vault, session_id = self.make_service(directory, http, now=now)
+            self._seed_app_calendar(database, vault, session_id, now)
+            self.assertEqual(service.delete_app_calendar(session_id, "cal-123"), "deleted")
+            self.assertEqual([call["method"] for call in http.calls], ["DELETE", "POST", "DELETE"])
+            self.assertEqual(http.calls[1]["url"], TOKEN_URL)
+            self.assertIn("Bearer access-fresh", http.calls[2]["headers"]["Authorization"])
             database.close()
 
     def test_deleted_dedicated_calendar_is_recreated_and_old_app_links_are_not_reused(self):

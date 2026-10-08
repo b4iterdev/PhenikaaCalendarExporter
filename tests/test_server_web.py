@@ -22,7 +22,7 @@ import phenikaa_exporter as pe
 from server.config import ServerConfig
 from server.crypto import TokenVault
 from server.db import Database, STATUS_ACTIVE, STATUS_PENDING_LOGIN
-from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
+from server.google import LEGACY_CLEANUP_SCOPE, SCOPE, GoogleCalendarError
 from server.login_broker import LoginBroker
 from server.oidc import SignedSessions
 from server.refresh import ProfileLocks
@@ -31,11 +31,14 @@ from server.web import ServerApplication, make_server
 
 
 class FakeGoogleService:
-    def __init__(self):
+    def __init__(self, calendar_result="deleted"):
         self.states: list[str] = []
         self.scopes: list[str] = []
         self.exchanges: list[tuple[str, str, str]] = []
         self.disconnects: list[str] = []
+        self.deleted_calendars: list[tuple[str, str]] = []
+        self.hidden_calendars: list[tuple[str, str]] = []
+        self.calendar_result = calendar_result
 
     def authorization_url(self, state: str, scope: str = SCOPE) -> str:
         self.states.append(state)
@@ -47,6 +50,18 @@ class FakeGoogleService:
 
     def disconnect(self, session_id: str) -> None:
         self.disconnects.append(session_id)
+
+    def delete_app_calendar(self, session_id: str, calendar_id: str) -> str:
+        if self.calendar_result == "raise":
+            raise GoogleCalendarError("Google exploded")
+        self.deleted_calendars.append((session_id, calendar_id))
+        return "already_gone" if self.calendar_result == "already_gone" else "deleted"
+
+    def remove_from_list(self, session_id: str, calendar_id: str) -> str:
+        if self.calendar_result == "raise":
+            raise GoogleCalendarError("Google exploded")
+        self.hidden_calendars.append((session_id, calendar_id))
+        return "already_gone" if self.calendar_result == "already_gone" else "removed"
 
 
 class RecordingSync:
@@ -552,6 +567,137 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertIsNone(database.get_user(user["id"]))
                 self.assertEqual(database.list_sessions(), [])
                 self.assertFalse((database.path if hasattr(database, "path") else Path(directory) / "profiles" / session_id).exists())
+            finally:
+                self._stop_app(database, server, thread)
+
+    def _seed_google_calendar(self, database, session_id, calendar_id="cal-123"):
+        database.upsert_google_connection(
+            session_id,
+            access_token_encrypted="enc-access",
+            refresh_token_encrypted="enc-refresh",
+            expires_at="2099-01-01T00:00:00+00:00",
+            scope=SCOPE,
+        )
+        database.set_google_calendar_id(session_id, calendar_id)
+
+    def _delete_account(self, server, calendar_action):
+        return self._request(
+            server,
+            "POST",
+            "/account/delete",
+            body=urllib.parse.urlencode(
+                {"csrf": "development", "confirmation": "DELETE", "calendar_action": calendar_action}
+            ),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+    def test_account_delete_calendar_action_keep_hide_delete_matrix(self):
+        for action, expect_deleted, expect_hidden in (
+            ("keep", [], []),
+            ("hide", [], ["cal-123"]),
+            ("delete", ["cal-123"], []),
+        ):
+            with self.subTest(calendar_action=action):
+                with tempfile.TemporaryDirectory() as directory:
+                    google = FakeGoogleService()
+                    _config, database, _signed, _sync, server, thread = self._start_app(
+                        directory, google=google
+                    )
+                    try:
+                        user = database.get_or_create_user("local-development-user", "Local user")
+                        session_id = database.create_session(user["id"])
+                        self._seed_google_calendar(database, session_id)
+                        status, headers, _body = self._delete_account(server, action)
+                        self.assertEqual(status, 303)
+                        self.assertEqual(headers["Location"], "/")
+                        self.assertIsNone(database.get_user(user["id"]))
+                        self.assertEqual([cal for _, cal in google.deleted_calendars], expect_deleted)
+                        self.assertEqual([cal for _, cal in google.hidden_calendars], expect_hidden)
+                    finally:
+                        self._stop_app(database, server, thread)
+
+    def test_account_delete_unknown_calendar_action_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            google = FakeGoogleService()
+            _config, database, _signed, _sync, server, thread = self._start_app(directory, google=google)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                self._seed_google_calendar(database, session_id)
+                status, _headers, _body = self._delete_account(server, "wipe")
+                self.assertEqual(status, 400)
+                self.assertIsNotNone(database.get_user(user["id"]))
+                self.assertEqual(google.deleted_calendars, [])
+                self.assertEqual(google.hidden_calendars, [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_account_delete_calendar_failure_warns_but_wipes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            google = FakeGoogleService(calendar_result="raise")
+            _config, database, _signed, _sync, server, thread = self._start_app(directory, google=google)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                self._seed_google_calendar(database, session_id)
+                status, headers, _body = self._delete_account(server, "delete")
+                self.assertEqual(status, 303)
+                self.assertTrue(headers["Location"].startswith("/?calendar_warning="))
+                self.assertIsNone(database.get_user(user["id"]))
+                self.assertEqual(database.list_sessions(), [])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_account_delete_calendar_already_gone_redirects_cleanly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            google = FakeGoogleService(calendar_result="already_gone")
+            _config, database, _signed, _sync, server, thread = self._start_app(directory, google=google)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                self._seed_google_calendar(database, session_id)
+                status, headers, _body = self._delete_account(server, "delete")
+                self.assertEqual(status, 303)
+                self.assertEqual(headers["Location"], "/")
+                self.assertIsNone(database.get_user(user["id"]))
+                self.assertEqual([cal for _, cal in google.deleted_calendars], ["cal-123"])
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_landing_escapes_calendar_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed, _sync, server, thread = self._start_app(directory)
+            try:
+                probe = "<script>alert(1)</script>"
+                status, _headers, body = self._request(
+                    server, "GET", "/?calendar_warning=" + urllib.parse.quote(probe, safe="")
+                )
+                self.assertEqual(status, 200)
+                self.assertNotIn(b"<script>alert(1)</script>", body)
+                self.assertIn(b"&lt;script&gt;", body)
+            finally:
+                self._stop_app(database, server, thread)
+
+    def test_settings_calendar_choice_shown_only_when_connected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            google = FakeGoogleService()
+            _config, database, _signed, _sync, server, thread = self._start_app(directory, google=google)
+            try:
+                user = database.get_or_create_user("local-development-user", "Local user")
+                session_id = database.create_session(user["id"])
+                status, _headers, body = self._request(server, "GET", "/settings")
+                self.assertEqual(status, 200)
+                self.assertNotIn(b'name="calendar_action"', body)
+                self._seed_google_calendar(database, session_id)
+                status, _headers, body = self._request(server, "GET", "/settings")
+                self.assertEqual(status, 200)
+                self.assertIn(b'name="calendar_action"', body)
+                self.assertIn(b'value="keep" checked', body)
+                status, _headers, body = self._request(
+                    server, "GET", "/settings", headers={"Cookie": "phenikaa_ui_language=vi"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("Giữ lịch".encode("utf-8"), body)
             finally:
                 self._stop_app(database, server, thread)
 
