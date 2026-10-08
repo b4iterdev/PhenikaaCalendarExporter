@@ -29,7 +29,7 @@ from server.db import (
     STATUS_NEEDS_HUMAN,
     STATUS_PENDING_LOGIN,
 )
-from server.google import LEGACY_CLEANUP_SCOPE, SCOPE
+from server.google import LEGACY_CLEANUP_SCOPE, SCOPE, GoogleCalendarError
 from server.google_login import GoogleLoginService
 from server.legal import privacy_policy_body, terms_body
 from server.login_broker import LoginBroker, validate_event
@@ -272,6 +272,10 @@ class ServerApplication:
             if str(form.get("confirmation") or "") != "DELETE":
                 self._error(handler, 400, "type DELETE to confirm account deletion")
                 return
+            calendar_action = str(form.get("calendar_action") or "keep")
+            if calendar_action not in ("keep", "hide", "delete"):
+                self._error(handler, 400, "unknown calendar action")
+                return
             account_sessions = self.database.list_sessions(int(user["id"]))
             if self.google_login is not None and not account_sessions:
                 try:
@@ -279,6 +283,7 @@ class ServerApplication:
                 except Exception:
                     self._error(handler, 502, "Google access revocation failed; retry account deletion")
                     return
+            calendar_warnings: list[str] = []
             for session in account_sessions:
                 session_id = str(session["id"])
                 # Disable first so the scheduler stops picking this session up
@@ -297,6 +302,8 @@ class ServerApplication:
                     )
                     return
                 try:
+                    if calendar_action in ("hide", "delete") and self.google is not None:
+                        self._remove_account_calendar(session_id, calendar_action, calendar_warnings)
                     if self.google_login is not None:
                         try:
                             self.google_login.revoke(int(user["id"]))
@@ -311,7 +318,14 @@ class ServerApplication:
                 finally:
                     lock.release()
             self.database.delete_user(int(user["id"]))
-            self._redirect(handler, "/", clear_cookie=True)
+            location = "/"
+            if calendar_warnings:
+                detail = (
+                    f"Google Calendar cleanup incomplete for {len(calendar_warnings)} calendar(s);"
+                    " remove 'Phenikaa Learning Calendar' manually if it remains."
+                )
+                location = "/?calendar_warning=" + urllib.parse.quote(detail, safe="")
+            self._redirect(handler, location, clear_cookie=True)
             return
         if path == "/sessions":
             default_start, default_end = academic_year_range()
@@ -680,6 +694,12 @@ class ServerApplication:
     def _public_export(self, handler: BaseHTTPRequestHandler, user: dict[str, Any] | None, identity: dict[str, Any] | None) -> None:
         language = self._language(handler)
         vi = language == "vi"
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+        warning = str((query.get("calendar_warning") or [""])[0])
+        notice = ""
+        if warning:
+            label = "Cảnh báo dọn dẹp lịch" if vi else "Calendar cleanup warning"
+            notice = f"""<section class="setup-card"><p class="eyebrow">{label}</p><p>{html.escape(warning)}</p></section>"""
         start, end = academic_year_range()
         csrf = self.signed_sessions.create({"purpose": "public_export"}, lifetime=30 * 60)
         empty_file_label = json.dumps("Chưa chọn file" if vi else "No file selected")
@@ -698,7 +718,7 @@ class ServerApplication:
              "or": "HOẶC" if vi else "OR", "submit": "Xuất tệp lịch" if vi else "Export calendar files",
         }
         body = f"""{self._navigation(user, identity, "export", language)}
-          <main><section class="export-shell"><div class="export-copy"><p class="eyebrow">{text['eyebrow']}</p><h1>{text['title']}</h1><p class="hero-lede">{text['description']}</p>
+          <main>{notice}<section class="export-shell"><div class="export-copy"><p class="eyebrow">{text['eyebrow']}</p><h1>{text['title']}</h1><p class="hero-lede">{text['description']}</p>
           <form class="export-form" method="post" action="/export" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{csrf}"><div class="date-row"><label>{text['from']} <input required type="date" name="range_start" value="{start.isoformat()}"></label><label>{text['to']} <input required type="date" name="range_end" value="{end.isoformat()}"></label></div>
           <div class="credential-grid"><fieldset><legend>{text['saved']}</legend><label class="file-dropzone" for="bootstrap-file"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="file-dropzone__copy"><strong>{text['file_prompt']}</strong><small class="file-name" aria-live="polite">{'Chưa chọn file' if vi else 'No file selected'}</small></span><input id="bootstrap-file" type="file" name="bootstrap_file" accept=".html,text/html"></label><p class="hint">{text['file_hint']}</p></fieldset><div class="or" aria-hidden="true"><span>{text['or']}</span></div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name="userId" autocomplete="off"></label><label>{'Mã Token' if vi else 'Access token'}<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">{text['manual_hint']}</p></fieldset></div><button class="button button--primary" type="submit">{text['submit']}</button></form></div><div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section></main>
           <script>const dropzone=document.querySelector('.file-dropzone');const fileInput=document.querySelector('#bootstrap-file');const fileName=document.querySelector('.file-name');if(dropzone&&fileInput&&fileName){{const showFile=()=>{{fileName.textContent=fileInput.files[0]?.name||{empty_file_label};}};['dragenter','dragover'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.add('file-dropzone--active');}}));['dragleave','drop'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.remove('file-dropzone--active');}}));dropzone.addEventListener('drop',e=>{{if(e.dataTransfer.files.length){{fileInput.files=e.dataTransfer.files;showFile();}}}});fileInput.addEventListener('change',showFile);}}</script>"""
@@ -919,26 +939,85 @@ class ServerApplication:
         handler.end_headers()
         handler.wfile.write(body)
 
+    def _remove_account_calendar(
+        self, session_id: str, calendar_action: str, calendar_warnings: list[str]
+    ) -> None:
+        """Best-effort hide/delete of the dedicated Google calendar before local wipe.
+
+        Runs while the Google token is still valid (before revoke/disconnect).
+        Failures are collected into calendar_warnings and never raised, so the
+        local account wipe always proceeds. Missing connections or calendar ids
+        are a silent no-op equivalent to keep.
+        """
+        assert self.google is not None
+        try:
+            connection = self.database.get_google_connection(session_id)
+        except Exception:
+            connection = None
+        if connection is None:
+            return
+        calendar_id = str(connection.get("calendar_id") or "").strip()
+        if not calendar_id:
+            return
+        try:
+            if calendar_action == "delete":
+                self.google.delete_app_calendar(session_id, calendar_id)
+            else:
+                self.google.remove_from_list(session_id, calendar_id)
+        except (GoogleCalendarError, ValueError) as error:
+            calendar_warnings.append(f"{calendar_id}: {error}")
+        except Exception as error:
+            calendar_warnings.append(f"{calendar_id}: {error.__class__.__name__}")
+        try:
+            self.database.delete_google_event_links_for_calendar(session_id, calendar_id)
+        except Exception:
+            pass
+
     def _settings(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         language = self._language(handler)
         csrf = html.escape(str(identity["csrf"]))
         vi = language == "vi"
         delete_title = "Xóa tài khoản" if language == "vi" else "Delete account"
         delete_copy = (
-            "Xóa phiên Phenikaa, dữ liệu xuất và kết nối Google của bạn. Hành động này không thể hoàn tác."
+            "Xóa phiên Phenikaa, dữ liệu xuất và kết nối Google của bạn. Chọn điều gì xảy ra với lịch “Phenikaa Learning Calendar” trong Google. Hành động này không thể hoàn tác."
             if language == "vi"
-            else "Delete your Phenikaa session, exports, and Google connections. This cannot be undone."
+            else "Delete your Phenikaa session, exports, and Google connections. Choose what happens to the “Phenikaa Learning Calendar” in Google. This cannot be undone."
         )
+        sessions = self.database.list_sessions(int(user["id"]))
+        has_google_calendar = self._has_google_calendar(sessions)
+        if vi:
+            calendar_choice = """<fieldset><legend>Lịch Google “Phenikaa Learning Calendar”</legend><label><input type="radio" name="calendar_action" value="keep" checked> Giữ lịch Google <small>Không thay đổi gì trong Google.</small></label><label><input type="radio" name="calendar_action" value="hide"> Ẩn khỏi danh sách <small>Xóa khỏi danh sách lịch, có thể thêm lại sau.</small></label><label><input type="radio" name="calendar_action" value="delete"> Xóa vĩnh viễn <small>Xóa lịch và toàn bộ sự kiện, không thể hoàn tác.</small></label></fieldset>"""
+        else:
+            calendar_choice = """<fieldset><legend>Google “Phenikaa Learning Calendar”</legend><label><input type="radio" name="calendar_action" value="keep" checked> Keep my Google calendar <small>Leave Google Calendar untouched.</small></label><label><input type="radio" name="calendar_action" value="hide"> Hide from list <small>Remove from your calendar list; you can re-add it later.</small></label><label><input type="radio" name="calendar_action" value="delete"> Delete permanently <small>Permanently delete the calendar and all its events. Cannot be undone.</small></label></fieldset>"""
         session_settings = "".join(
             f"""<div class="managed-session"><div><strong>{html.escape(str(session["label"]))}</strong><p>{html.escape(self._status_label(str(session["status"]), language))}</p></div><form method="post" action="/sessions/{html.escape(str(session["id"]))}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Xóa phiên' if vi else 'Delete session'}</button></form></div>"""
-            for session in self.database.list_sessions(int(user["id"]))
+            for session in sessions
         )
         session_management = f"<section class=\"settings-card\"><p class=\"eyebrow\">{'QUẢN LÝ PHIÊN' if vi else 'SESSION MANAGEMENT'}</p><h2>{'Các phiên Phenikaa' if vi else 'Phenikaa sessions'}</h2>{session_settings or f'<p class=\"text-muted\">{"Chưa có phiên nào được kết nối." if vi else "No sessions connected."}</p>'}</section>"
+        calendar_block = calendar_choice if has_google_calendar else ""
         body = f"""
         {self._navigation(user, identity, "settings", language)}
         <main><div class="section-heading"><div><p class="eyebrow">{'TÙY CHỈNH' if vi else 'PREFERENCES'}</p><h2>{'Cài đặt' if vi else 'Settings'}</h2></div><span class="section-rule"></span></div>
-        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">{'KHU VỰC NGUY HIỂM' if vi else 'DANGER ZONE'}</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}"><label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
+        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">{'KHU VỰC NGUY HIỂM' if vi else 'DANGER ZONE'}</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}">{calendar_block}<label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
         self._html(handler, 200, self._layout("Settings", body), no_store=True)
+
+    def _has_google_calendar(self, sessions: list[dict[str, Any]]) -> bool:
+        if self.google is None and self.google_login is None:
+            return False
+        for session in sessions:
+            try:
+                state = self.database.get_google_calendar_state(str(session["id"]))
+            except Exception:
+                state = None
+            if state and str(state.get("calendar_id") or "").strip():
+                return True
+            try:
+                connection = self.database.get_google_connection(str(session["id"]))
+            except Exception:
+                connection = None
+            if connection and str(connection.get("calendar_id") or "").strip():
+                return True
+        return False
 
     def _navigation(self, user: dict[str, Any] | None, identity: dict[str, Any] | None, active: str, language: str) -> str:
         vi = language == "vi"
