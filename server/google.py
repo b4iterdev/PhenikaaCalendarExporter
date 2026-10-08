@@ -18,6 +18,7 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 CALENDARS_URL = "https://www.googleapis.com/calendar/v3/calendars"
+CALENDAR_LIST_URL = "https://www.googleapis.com/calendar/v3/users/me/calendarList"
 EVENTS_BASE_URL = "https://www.googleapis.com/calendar/v3/calendars"
 PRIMARY_CALENDAR_ID = "primary"
 APP_CALENDAR_SUMMARY = "Phenikaa Learning Calendar"
@@ -133,6 +134,54 @@ class GoogleCalendarService:
         if response.status not in (200, 400):
             raise GoogleCalendarError(self._error_message(response.status, self._json(response)))
         self.database.delete_google_connection(session_id)
+
+    def delete_app_calendar(self, session_id: str, calendar_id: str) -> str:
+        """Permanently delete the dedicated secondary calendar. Returns deleted|already_gone."""
+        dedicated_id = self._app_calendar_id(calendar_id)
+        if not dedicated_id:
+            raise ValueError("Google dedicated calendar ID cannot be primary")
+        return self._delete_calendar_resource(session_id, self._calendar_url(dedicated_id))
+
+    def remove_from_list(self, session_id: str, calendar_id: str) -> str:
+        """Hide the dedicated calendar from the user's list (recoverable). Returns removed|already_gone."""
+        dedicated_id = self._app_calendar_id(calendar_id)
+        if not dedicated_id:
+            raise ValueError("Google dedicated calendar ID cannot be primary")
+        url = CALENDAR_LIST_URL + "/" + urllib.parse.quote(dedicated_id, safe="")
+        result = self._delete_calendar_resource(session_id, url)
+        return "removed" if result == "deleted" else result
+
+    def _delete_calendar_resource(self, session_id: str, url: str) -> str:
+        connection = self.connection(session_id)
+        if connection is None:
+            raise GoogleCalendarError("Google Calendar is not connected")
+        access_token = self._valid_access_token(session_id, connection)
+        status, payload = self._calendar_request("DELETE", url, access_token, None)
+        if status in (200, 204):
+            return "deleted"
+        if status in (404, 410):
+            return "already_gone"
+        if status == 401:
+            access_token = self._force_token_refresh(session_id, connection)
+            status, payload = self._calendar_request("DELETE", url, access_token, None)
+            if status in (200, 204):
+                return "deleted"
+            if status in (404, 410):
+                return "already_gone"
+        raise GoogleCalendarError(self._error_message(status, payload))
+
+    def _force_token_refresh(self, session_id: str, connection: dict[str, Any]) -> str:
+        refresh_token = self.vault.decrypt(str(connection["refresh_token_encrypted"]))
+        token = self._token_request({
+            "client_id": self.config.client_id,
+            "client_secret": self.config.client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        })
+        self._store_tokens(
+            session_id, token, existing_refresh_token=refresh_token, scope_fallback=str(connection.get("scope") or "")
+        )
+        return str(token["access_token"])
 
     def sync_session(self, session_id: str, events: list[dict[str, Any]]) -> GoogleSyncResult:
         connection = self.connection(session_id)
