@@ -135,17 +135,26 @@ def login_flow(
                 except Exception:
                     pass
 
+        auth_cookie = None
+        for c in context.cookies():
+            if c.get("name") == ".Auth" and "qldtbeta" in c.get("domain", ""):
+                auth_cookie = c.get("value")
+                break
         context.close()
     progress("Sign-in captured.")
-    return {"userId": session["userId"], "tokenJWT": session["tokenJWT"]}
+    result = {"userId": session["userId"], "tokenJWT": session["tokenJWT"]}
+    if auth_cookie:
+        result["authCookie"] = auth_cookie
+    return result
 
 
 def save_auth_json(session: dict[str, Any], path: Path | str = DEFAULT_AUTH_JSON) -> Path:
     """Write credentials to a 0600 JSON file without exposing them in output."""
     destination = Path(path).expanduser()
-    payload = json.dumps(
-        {"userId": session["userId"], "tokenJWT": session["tokenJWT"]}, ensure_ascii=False, indent=2
-    )
+    data = {"userId": session["userId"], "tokenJWT": session["tokenJWT"]}
+    if session.get("authCookie"):
+        data["authCookie"] = session["authCookie"]
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
     handle = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(handle, "w", encoding="utf-8") as stream:
         stream.write(payload + "\n")

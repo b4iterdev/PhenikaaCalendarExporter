@@ -103,12 +103,24 @@ def silent_refresh(
         page.on("request", on_request)
         try:
             page.goto(portal_url, wait_until="domcontentloaded", timeout=60_000)
+            if "login.aspx" in page.url and page.locator("#btnDangNhapMicrosoft").is_visible():
+                page.click("#btnDangNhapMicrosoft")
+                try:
+                    page.wait_for_url("**/congsinhvien/index.aspx*", timeout=30_000)
+                except Exception:
+                    pass
         except Exception:
             pass
 
         deadline = time.monotonic() + timeout
         while set(session) != {"userId", "tokenJWT"}:
             page.wait_for_timeout(1000)
+            if "login.aspx" in page.url and page.locator("#btnDangNhapMicrosoft").is_visible():
+                try:
+                    page.click("#btnDangNhapMicrosoft")
+                    page.wait_for_url("**/congsinhvien/index.aspx*", timeout=20_000)
+                except Exception:
+                    pass
             if time.monotonic() > deadline:
                 raise LoginTimeout("silent refresh timed out; the portal wants a human sign-in")
             try:
@@ -120,6 +132,14 @@ def silent_refresh(
                     merge_candidate(session_from_response(portal_url, page.content()))
                 except Exception:
                     pass
+
+        try:
+            for c in context.cookies():
+                if c.get("name") == ".Auth" and "qldtbeta" in c.get("domain", ""):
+                    session["authCookie"] = c.get("value")
+                    break
+        except Exception:
+            pass
     finally:
         context.close()
         if playwright_owner is not None:
@@ -128,7 +148,10 @@ def silent_refresh(
             except Exception:
                 pass
 
-    return {"userId": session["userId"], "tokenJWT": session["tokenJWT"]}
+    result = {"userId": session["userId"], "tokenJWT": session["tokenJWT"]}
+    if session.get("authCookie"):
+        result["authCookie"] = session["authCookie"]
+    return result
 
 
 class ProfileLocks:

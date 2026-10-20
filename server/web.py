@@ -2126,8 +2126,10 @@ class ServerApplication:
 
         def complete(captured: dict[str, Any]) -> None:
             token = str(captured["tokenJWT"])
+            auth_cookie = captured.get("authCookie")
+            stored_payload = json.dumps({"tokenJWT": token, "authCookie": auth_cookie}) if auth_cookie else token
             self.database.update_session_credentials(
-                sid, str(captured["userId"]), self.vault.encrypt(token), str(token_fingerprint(token))
+                sid, str(captured["userId"]), self.vault.encrypt(stored_payload), str(token_fingerprint(token))
             )
             self.sync_engine.request_sync(sid)
 

@@ -263,6 +263,12 @@ class LoginBroker:
                         cdp.send("Page.stopScreencast")
                     except Exception:
                         pass
+                try:
+                    for c in context.cookies():
+                        if c.get("name") == ".Auth" and "qldtbeta" in c.get("domain", ""):
+                            state.captured["authCookie"] = c.get("value")
+                except Exception:
+                    pass
                 context.close()
                 if playwright_owner is not None:
                     try:
@@ -271,7 +277,10 @@ class LoginBroker:
                         pass
                 state.finished.set()
         progress("sign-in captured")
-        return {"userId": state.captured["userId"], "tokenJWT": state.captured["tokenJWT"]}
+        result = {"userId": state.captured["userId"], "tokenJWT": state.captured["tokenJWT"]}
+        if state.captured.get("authCookie"):
+            result["authCookie"] = state.captured["authCookie"]
+        return result
 
     def start_login(
         self,

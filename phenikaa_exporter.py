@@ -123,23 +123,30 @@ def fetch_calendar(
         "strNguoiThucHien_Id": user_id,
     }
     encrypted = xor_b64_encode(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), CALENDAR_ACTION_KEY)
+    headers = {
+        "Authorization": "Bearer " + str(token),
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Origin": PORTAL_BASE_URL,
+        "Referer": PORTAL_BASE_URL + "/congsinhvien/index.aspx",
+    }
+    if session.get("cookies"):
+        headers["Cookie"] = str(session["cookies"])
+    elif session.get("authCookie"):
+        headers["Cookie"] = f".Auth={session['authCookie']}"
+
     request = urllib.request.Request(
         base_url.rstrip("/") + CALENDAR_API_PATH,
         data=urllib.parse.urlencode({"A": encrypted}).encode("ascii"),
         method="POST",
-        headers={
-            "Authorization": "Bearer " + str(token),
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Origin": PORTAL_BASE_URL,
-            "Referer": PORTAL_BASE_URL + "/congsinhvien/index.aspx",
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:

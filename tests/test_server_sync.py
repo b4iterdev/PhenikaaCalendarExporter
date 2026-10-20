@@ -107,6 +107,27 @@ class SyncEngineTests(unittest.TestCase):
             self.assertEqual(received_old_token, ["old-token"])
             database.close()
 
+    def test_sync_extracts_auth_cookie_from_stored_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, database, vault, session_id = self.make_session(directory)
+            received_auth = []
+
+            def fetch(auth, *_args):
+                received_auth.append(auth)
+                return [SAMPLE_EVENT]
+
+            stored_payload = json.dumps({"tokenJWT": "jwt-123", "authCookie": "auth-abc"})
+            database.update_session_credentials(session_id, "user-1", vault.encrypt(stored_payload), "fp")
+
+            engine = SyncEngine(config, database, vault, fetcher=fetch)
+            stored = database.get_session(session_id)
+            assert stored is not None
+            result = engine.sync_session(stored)
+            self.assertTrue(result.ok)
+            self.assertEqual(received_auth[0]["tokenJWT"], "jwt-123")
+            self.assertEqual(received_auth[0]["authCookie"], "auth-abc")
+            database.close()
+
     def test_failed_refresh_requires_human(self):
         with tempfile.TemporaryDirectory() as directory:
             config, database, vault, session_id = self.make_session(directory)

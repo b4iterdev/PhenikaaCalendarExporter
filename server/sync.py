@@ -116,7 +116,17 @@ class SyncEngine:
             user_id = session.get("phenikaa_user_id")
             if not encrypted or not user_id:
                 raise LoginTimeout("session requires an interactive login")
-            auth = {"userId": str(user_id), "tokenJWT": self.vault.decrypt(str(encrypted))}
+            decrypted = self.vault.decrypt(str(encrypted))
+            if decrypted.startswith("{") and "tokenJWT" in decrypted:
+                try:
+                    payload = json.loads(decrypted)
+                    auth = {"userId": str(user_id), "tokenJWT": str(payload["tokenJWT"])}
+                    if payload.get("authCookie"):
+                        auth["authCookie"] = payload["authCookie"]
+                except Exception:
+                    auth = {"userId": str(user_id), "tokenJWT": decrypted}
+            else:
+                auth = {"userId": str(user_id), "tokenJWT": decrypted}
             start, end = self._date_range(session)
             try:
                 events = self.fetcher(auth, start, end)
@@ -137,10 +147,12 @@ class SyncEngine:
                         no_sandbox=self.config.browser_no_sandbox,
                     )
                 token = str(auth["tokenJWT"])
+                auth_cookie = auth.get("authCookie")
+                stored_payload = json.dumps({"tokenJWT": token, "authCookie": auth_cookie}) if auth_cookie else token
                 self.database.update_session_credentials(
                     session_id,
                     str(auth["userId"]),
-                    self.vault.encrypt(token),
+                    self.vault.encrypt(stored_payload),
                     str(token_fingerprint(token)),
                 )
                 refreshed = True
