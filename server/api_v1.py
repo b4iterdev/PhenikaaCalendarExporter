@@ -9,18 +9,12 @@ def ok(data: Any) -> dict[str, Any]:
         "data": data,
     }
 
-
-def err(code: str, message: str) -> dict[str, Any]:
+def err(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create a standard API error response."""
-    return {
-        "ok": False,
-        "error": {
-            "code": code,
-            "message": message,
-        },
-    }
-
-
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details:
+        error["details"] = details
+    return {"ok": False, "error": error}
 def parse_date(value: Any) -> date:
     """Parse an API date in ISO or DD/MM/YYYY format."""
     if not isinstance(value, str):
@@ -343,7 +337,18 @@ def openapi_document() -> dict[str, Any]:
                 "delete": {
                     "tags": ["Sessions"],
                     "summary": "Delete a session and clean up related resources",
-                    "responses": json_response,
+                    "description": "Disables the session, removes its browser profile and exports, then deletes it. The owner's Google calendar is kept unless calendar=hide or calendar=delete is given.",
+                    "parameters": [
+                        session_id,
+                        {"name": "calendar", "in": "query", "required": False,
+                         "description": "What to do with the owner's Google calendar.",
+                         "schema": {"type": "string", "enum": ["keep", "hide", "delete"], "default": "keep"}},
+                    ],
+                    "responses": {
+                        **json_response,
+                        "400": {"description": "invalid_request: calendar must be keep, hide, or delete"},
+                        "409": {"description": "conflict_running: a sync or sign-in is using the session; retry shortly"},
+                    },
                 },
             },
             "/api/v1/sessions/{sessionId}/events": {
@@ -389,11 +394,14 @@ def openapi_document() -> dict[str, Any]:
             "/api/v1/sessions/{sessionId}/sync": {
                 "post": {
                     "tags": ["Sync"],
-                    "summary": "Request a session sync",
+                    "summary": "Queue a session sync",
+                    "description": "Queues a background sync and returns its run id; poll the run endpoint for the result. Requires the owner to have signed in to Phenikaa in the web app. Runs once at a time per session and at least 60 seconds apart.",
                     "parameters": [session_id],
                     "responses": {
-                        "202": {"description": "Sync request accepted"},
-                        "409": {"description": "Sync could not be queued"},
+                        "202": {"description": "Sync queued; data.runId and data.status are returned"},
+                        "409": {"description": "login_required, session_disabled, or conflict_running (error.details.runId is the running sync)"},
+                        "429": {"description": "The previous run finished less than 60 seconds ago; see the Retry-After header"},
+                        "503": {"description": "Sync could not be queued"},
                     },
                 }
             },

@@ -68,7 +68,7 @@ class RecordingSync:
     def __init__(self) -> None:
         self.requested: list[str] = []
 
-    def request_sync(self, session_id: str) -> None:
+    def request_sync(self, session_id: str, *, run_id: int | None = None) -> None:
         self.requested.append(session_id)
 
 

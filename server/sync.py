@@ -53,18 +53,20 @@ class SyncEngine:
         self.google_syncer = google_syncer
         self._stop = threading.Event()
         self._wake = threading.Event()
-        self._forced: set[str] = set()
+        self._forced: dict[str, int | None] = {}
         self._forced_lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
-    def request_sync(self, session_id: str) -> None:
+    def request_sync(self, session_id: str, *, run_id: int | None = None) -> None:
         with self._forced_lock:
-            self._forced.add(session_id)
+            if run_id is not None or session_id not in self._forced:
+                self._forced[session_id] = run_id
         self._wake.set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self.database.fail_unfinished_sync_runs()
         self._thread = threading.Thread(target=self.run_forever, name="calendar-sync", daemon=True)
         self._thread.start()
 
@@ -83,7 +85,7 @@ class SyncEngine:
     def sync_due(self, *, now: datetime | None = None) -> list[SyncResult]:
         current = now or datetime.now(timezone.utc)
         with self._forced_lock:
-            forced = set(self._forced)
+            forced = dict(self._forced)
             self._forced.clear()
         results: list[SyncResult] = []
         for session in self.database.list_sessions():
@@ -93,20 +95,21 @@ class SyncEngine:
             last_sync = session.get("last_sync_at")
             due = not last_sync or current - datetime.fromisoformat(str(last_sync)) >= timedelta(hours=interval)
             if session["id"] in forced or due:
-                results.append(self.sync_session(session))
+                results.append(self.sync_session(session, run_id=forced.get(session["id"])))
         return results
 
-    def sync_session(self, session: dict[str, Any]) -> SyncResult:
+    def sync_session(self, session: dict[str, Any], *, run_id: int | None = None) -> SyncResult:
         session_id = str(session["id"])
         with self.locks.for_profile(session_id):
             current = self.database.get_session(session_id)
             if current is None:
                 return SyncResult(False, 0, False, "session was deleted")
-            return self._sync_locked(current)
+            return self._sync_locked(current, run_id=run_id)
 
-    def _sync_locked(self, session: dict[str, Any]) -> SyncResult:
+    def _sync_locked(self, session: dict[str, Any], *, run_id: int | None = None) -> SyncResult:
         session_id = str(session["id"])
-        run_id = self.database.start_sync_run(session_id)
+        if run_id is None:
+            run_id = self.database.start_sync_run(session_id)
         refreshed = False
         try:
             encrypted = session.get("token_encrypted")

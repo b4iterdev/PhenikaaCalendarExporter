@@ -48,6 +48,13 @@ class ServerConfig:
     browser_no_sandbox: bool = field(
         default_factory=lambda: os.environ.get("PHENIKAA_BROWSER_NO_SANDBOX", "").lower() in ("1", "true", "yes")
     )
+    trusted_proxies: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            item.strip()
+            for item in os.environ.get("PHENIKAA_SERVER_TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
+            if item.strip()
+        )
+    )
     # oidc, google, or disabled (single local development user)
     auth_mode: str = field(default_factory=lambda: os.environ.get("PHENIKAA_SERVER_AUTH", "oidc"))
     oidc_issuer: str = field(default_factory=lambda: os.environ.get("PHENIKAA_OIDC_ISSUER", ""))

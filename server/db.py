@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -548,6 +548,49 @@ class Database:
             (session_id, run_id),
         )
         return dict(row) if row else None
+
+    def start_sync_run_if_idle(
+        self, session_id: str, *, stale_after_minutes: int = 30
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """Atomic. Returns (run_id, None), or (None, running_row) if a run is unfinished."""
+        stale_before = (datetime.now(timezone.utc) - timedelta(minutes=stale_after_minutes)).isoformat()
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "UPDATE sync_runs SET finished_at = ?, ok = 0, detail = ?"
+                    " WHERE session_id = ? AND finished_at IS NULL AND started_at < ?",
+                    (utc_now_iso(), "timed out", session_id, stale_before),
+                )
+                running = self._conn.execute(
+                    "SELECT * FROM sync_runs WHERE session_id = ? AND finished_at IS NULL"
+                    " ORDER BY id DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if running is not None:
+                    self._conn.commit()
+                    return None, dict(running)
+                cursor = self._conn.execute(
+                    "INSERT INTO sync_runs (session_id, started_at) VALUES (?, ?)",
+                    (session_id, utc_now_iso()),
+                )
+                self._conn.commit()
+                return int(cursor.lastrowid), None
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def fail_unfinished_sync_runs(self, detail: str = "interrupted by server restart") -> int:
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    "UPDATE sync_runs SET finished_at = ?, ok = 0, detail = ? WHERE finished_at IS NULL",
+                    (utc_now_iso(), detail),
+                )
+                self._conn.commit()
+                return cursor.rowcount
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def upsert_google_connection(
         self,

@@ -660,6 +660,32 @@
           "Sessions"
         ],
         "summary": "Delete a session and clean up related resources",
+        "description": "Disables the session, removes its browser profile and exports, then deletes it. The owner's Google calendar is kept unless calendar=hide or calendar=delete is given.",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "calendar",
+            "in": "query",
+            "required": false,
+            "description": "What to do with the owner's Google calendar.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "keep",
+                "hide",
+                "delete"
+              ],
+              "default": "keep"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful JSON response",
@@ -672,7 +698,7 @@
             }
           },
           "400": {
-            "description": "Invalid request"
+            "description": "invalid_request: calendar must be keep, hide, or delete"
           },
           "401": {
             "description": "Authentication required"
@@ -685,6 +711,9 @@
           },
           "429": {
             "description": "Rate limit exceeded"
+          },
+          "409": {
+            "description": "conflict_running: a sync or sign-in is using the session; retry shortly"
           }
         }
       }
@@ -842,7 +871,8 @@
         "tags": [
           "Sync"
         ],
-        "summary": "Request a session sync",
+        "summary": "Queue a session sync",
+        "description": "Queues a background sync and returns its run id; poll the run endpoint for the result. Requires the owner to have signed in to Phenikaa in the web app. Runs once at a time per session and at least 60 seconds apart.",
         "parameters": [
           {
             "name": "sessionId",
@@ -855,9 +885,15 @@
         ],
         "responses": {
           "202": {
-            "description": "Sync request accepted"
+            "description": "Sync queued; data.runId and data.status are returned"
           },
           "409": {
+            "description": "login_required, session_disabled, or conflict_running (error.details.runId is the running sync)"
+          },
+          "429": {
+            "description": "The previous run finished less than 60 seconds ago; see the Retry-After header"
+          },
+          "503": {
             "description": "Sync could not be queued"
           }
         }

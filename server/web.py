@@ -4,6 +4,8 @@ import hashlib
 import html
 import io
 import json
+import uuid
+import os
 import math
 import secrets
 import shutil
@@ -12,7 +14,7 @@ import threading
 import time
 import urllib.parse
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from email.parser import BytesParser
 from email.policy import default
 from http import cookies
@@ -20,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
 
-from phenikaa_exporter import export_calendar_files, parse_bootstrap_html
+from phenikaa_exporter import export_calendar_files, parse_bootstrap_html, write_xlsx
 from phenikaa_login import LoginTimeout
 
 from server.config import ServerConfig, academic_year_range
@@ -52,6 +54,7 @@ STATUS_LABELS = {
     "disabled": "Disabled",
          }
 MAX_EXPORT_FORM_BYTES = 1024 * 1024
+API_SYNC_COOLDOWN_SECONDS = 60
 
 
 class GoogleCalendarWebService(Protocol):
@@ -66,7 +69,7 @@ class GoogleCalendarWebService(Protocol):
 
 
 class SyncRequester(Protocol):
-    def request_sync(self, session_id: str) -> None:
+    def request_sync(self, session_id: str, *, run_id: int | None = None) -> None:
         pass
 
 
@@ -201,6 +204,9 @@ class ServerApplication:
                 return
             self._api_v1_error_response(handler, 404, "not_found", "API route not found.")
             return
+        if path.startswith("/api/v1"):
+            self._api_v1_error_response(handler, 404, "not_found", "API route not found.")
+            return
         if path in ("/api/status", "/status.json"):
             refresh = "refresh" in urllib.parse.parse_qs(parsed.query)
             self._json(handler, 200, self._get_system_status(refresh=refresh))
@@ -319,6 +325,9 @@ class ServerApplication:
             return
         if path == "/api/v1/export/one-shot":
             self._api_v1_one_shot(handler, urllib.parse.parse_qs(parsed.query))
+            return
+        if path.startswith("/api/v1"):
+            self._api_v1_error_response(handler, 404, "not_found", "API route not found.")
             return
         identity = self._identity(handler)
         if identity is None and path != "/export":
@@ -538,12 +547,13 @@ class ServerApplication:
         self._error(handler, 404, "not found")
 
     def _api_v1_error_response(
-        self, handler: BaseHTTPRequestHandler, status: int, code: str, message: str
+        self, handler: BaseHTTPRequestHandler, status: int, code: str, message: str,
+        details: dict[str, Any] | None = None,
     ) -> None:
         self._json(
             handler,
             status,
-            api_err(code, message),
+            api_err(code, message, details),
             content_type="application/json; charset=utf-8",
         )
 
@@ -755,6 +765,14 @@ class ServerApplication:
         if session is None:
             return
 
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+        calendar_action = (query.get("calendar") or ["keep"])[0]
+        if calendar_action not in ("keep", "hide", "delete"):
+            self._api_v1_error_response(
+                handler, 400, "invalid_request", "calendar must be keep, hide, or delete."
+            )
+            return
+
         self.broker.forget_attempt(session_id)
         self.database.update_session_status(session_id, STATUS_DISABLED)
         lock = self._acquire_profile_lock(session_id)
@@ -764,7 +782,8 @@ class ServerApplication:
         warnings: list[str] = []
         try:
             if self.google is not None:
-                self._remove_account_calendar(session_id, "delete", warnings)
+                if calendar_action != "keep":
+                    self._remove_account_calendar(session_id, calendar_action, warnings)
                 if self.database.get_google_connection(session_id) is not None:
                     self.google.disconnect(session_id)
             self.broker.delete_profile(session_id)
@@ -838,6 +857,8 @@ class ServerApplication:
         exports = []
         for extension in ("json", "ics", "xlsx"):
             file_path = root / f"calendar.{extension}"
+            if extension == "xlsx" and (root / "calendar.json").is_file():
+                file_path = self._api_v1_ensure_xlsx(session_id) or file_path
             if file_path.is_file():
                 stat = file_path.stat()
                 exports.append({
@@ -849,6 +870,27 @@ class ServerApplication:
             handler, 200, api_ok({"exports": exports}),
             content_type="application/json; charset=utf-8",
         )
+
+    def _api_v1_ensure_xlsx(self, session_id: str) -> Path | None:
+        base = self.config.exports_dir / session_id
+        source, target = base / "calendar.json", base / "calendar.xlsx"
+        if not source.is_file():
+            return None
+        if target.is_file() and target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+            return target
+        try:
+            events = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(events, list) or not events:
+                return None
+            temporary = base / f"calendar.{uuid.uuid4().hex}.tmp.xlsx"
+            try:
+                write_xlsx(temporary, events)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            return None
+        return target
 
     def _api_v1_download_export(
         self, handler: BaseHTTPRequestHandler, session_id: str, filename: str
@@ -867,8 +909,11 @@ class ServerApplication:
         if content_type is None:
             self._api_v1_error_response(handler, 404, "not_found", "Export not found.")
             return
-        file_path = self.config.exports_dir / session_id / filename
-        if not file_path.is_file():
+        if filename == "calendar.xlsx":
+            file_path = self._api_v1_ensure_xlsx(session_id)
+        else:
+            file_path = self.config.exports_dir / session_id / filename
+        if file_path is None or not file_path.is_file():
             self._api_v1_error_response(handler, 404, "not_found", "Export is not available.")
             return
         body = file_path.read_bytes()
@@ -898,22 +943,47 @@ class ServerApplication:
         credential = self._api_v1_require_bearer(handler, "sync:write")
         if credential is None:
             return
-        if self._api_v1_owned_session(handler, credential, session_id) is None:
+        session = self._api_v1_owned_session(handler, credential, session_id)
+        if session is None:
             return
-        before = {item["id"] for item in self.database.last_sync_runs(session_id, limit=20)}
+        if session.get("status") == STATUS_DISABLED:
+            self._api_v1_error_response(handler, 409, "session_disabled", "Session is disabled.")
+            return
+        if not session.get("token_encrypted") or not session.get("phenikaa_user_id"):
+            self._api_v1_error_response(
+                handler, 409, "login_required",
+                "Sign in to Phenikaa in the web app before syncing.",
+            )
+            return
+        last = self.database.last_sync_runs(session_id, limit=1)
+        if last and last[0].get("finished_at"):
+            try:
+                finished = datetime.fromisoformat(str(last[0]["finished_at"]))
+                if finished.tzinfo is None:
+                    finished = finished.replace(tzinfo=timezone.utc)
+                waited = (datetime.now(timezone.utc) - finished).total_seconds()
+            except (ValueError, TypeError):
+                waited = API_SYNC_COOLDOWN_SECONDS
+            if waited < API_SYNC_COOLDOWN_SECONDS:
+                self._api_v1_rate_limited_response(
+                    handler, math.ceil(API_SYNC_COOLDOWN_SECONDS - waited)
+                )
+                return
+        run_id, running = self.database.start_sync_run_if_idle(session_id)
+        if running is not None:
+            self._api_v1_error_response(
+                handler, 409, "conflict_running", "A sync is already running.",
+                {"runId": running["id"]},
+            )
+            return
         try:
-            self.sync_engine.request_sync(session_id)
+            self.sync_engine.request_sync(session_id, run_id=run_id)
         except Exception:
-            self._api_v1_error_response(handler, 409, "conflict_running", "Sync could not be queued.")
+            self.database.finish_sync_run(run_id, ok=False, detail="could not queue sync")
+            self._api_v1_error_response(handler, 503, "sync_unavailable", "Sync could not be queued.")
             return
-        runs = self.database.last_sync_runs(session_id, limit=20)
-        created = next((item for item in runs if item["id"] not in before), None)
         self._json(
-            handler, 202,
-            api_ok({
-                "runId": created["id"] if created else None,
-                "status": self._api_v1_run_summary(created)["status"] if created else "queued",
-            }),
+            handler, 202, api_ok({"runId": run_id, "status": "running"}),
             content_type="application/json; charset=utf-8",
         )
 
@@ -1014,6 +1084,11 @@ class ServerApplication:
                 api_err("invalid_auth", "A valid Bearer API token is required."),
                 content_type=content_type,
             )
+            return None
+
+        wait = self._api_v1_rate_check("tok:" + str(credential["token_id"]), 60)
+        if wait:
+            self._api_v1_rate_limited_response(handler, wait)
             return None
 
         if required_scope not in credential["scopes"]:
@@ -1641,37 +1716,50 @@ class ServerApplication:
         </main>"""
         self._html(handler, 200, self._layout("Server status" if not vi else "Trạng thái máy chủ", body), no_store=True)
 
-    def _api_v1_rate_limited(self, handler: BaseHTTPRequestHandler) -> bool:
-        address = getattr(handler, "client_address", ("unknown",))
-        remote_ip = str(address[0]) if address else "unknown"
-        if remote_ip in ("127.0.0.1", "::1", "localhost"):
-            forwarded = (
-                handler.headers.get("CF-Connecting-IP")
-                or handler.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
-            )
-            if forwarded:
-                remote_ip = forwarded
+    def _api_v1_client_ip(self, handler: BaseHTTPRequestHandler) -> str:
+        peer = str(handler.client_address[0])
+        if peer in self.config.trusted_proxies:
+            direct = (handler.headers.get("CF-Connecting-IP") or "").strip()
+            if direct:
+                return direct
+            parts = [
+                part.strip()
+                for part in (handler.headers.get("X-Forwarded-For") or "").split(",")
+                if part.strip()
+            ]
+            if parts:
+                return parts[-1]  # muc do proxy tin cay noi vao; muc dau client tu dat duoc
+        return peer
+
+    def _api_v1_rate_check(self, key: str, limit: int, window: float = 60.0) -> int:
+        """Return 0 if allowed, otherwise the number of seconds to wait."""
         now = time.monotonic()
-        cutoff = now - 60.0
-
         with self._api_v1_rate_lock:
-            for ip in list(self._api_v1_request_times):
-                fresh = [
-                    stamp for stamp in self._api_v1_request_times[ip]
-                    if stamp > cutoff
-                ]
-                if fresh:
-                    self._api_v1_request_times[ip] = fresh
-                else:
-                    del self._api_v1_request_times[ip]
-
-            recent = self._api_v1_request_times.get(remote_ip, [])
-            if len(recent) >= 10:
-                return True
-
+            table = self._api_v1_request_times
+            if len(table) > 5000:
+                for stale in [k for k, v in table.items() if not v or v[-1] <= now - window]:
+                    del table[stale]
+            recent = [stamp for stamp in table.get(key, []) if stamp > now - window]
+            if len(recent) >= limit:
+                table[key] = recent
+                return max(1, math.ceil(recent[0] + window - now))
             recent.append(now)
-            self._api_v1_request_times[remote_ip] = recent
-            return False
+            table[key] = recent
+            return 0
+
+    def _api_v1_rate_limited_response(
+        self, handler: BaseHTTPRequestHandler, retry_after: int
+    ) -> None:
+        body = json.dumps(
+            api_err("rate_limited", "Too many requests; try again later.", {"retryAfter": retry_after})
+        ).encode("utf-8")
+        handler.send_response(429)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Retry-After", str(retry_after))
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
 
     def _api_v1_one_shot(
         self,
@@ -1683,8 +1771,9 @@ class ServerApplication:
         def fail(status: int, code: str, message: str) -> None:
             self._json(handler, status, api_err(code, message), content_type=json_type)
 
-        if self._api_v1_rate_limited(handler):
-            fail(429, "rate_limited", "Too many requests; try again later.")
+        wait = self._api_v1_rate_check("ip:" + self._api_v1_client_ip(handler), 10)
+        if wait:
+            self._api_v1_rate_limited_response(handler, wait)
             return
 
         try:
