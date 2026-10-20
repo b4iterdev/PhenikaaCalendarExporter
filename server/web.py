@@ -266,12 +266,15 @@ class ServerApplication:
                 self._error(handler, 400, "unsupported language")
                 return
             target = (urllib.parse.parse_qs(parsed.query).get("return") or ["/"])[0]
-            if target not in ("/", "/dashboard", "/about", "/settings", "/status"):
+            if target not in ("/", "/dashboard", "/about", "/settings", "/status", "/developers"):
                 target = "/"
             self._redirect_language(handler, target, language)
             return
         if path == "/dashboard":
             self._dashboard(handler, user, identity)
+            return
+        if path == "/developers":
+            self._developers(handler, user, identity)
             return
         if path == "/settings":
             self._settings(handler, user, identity)
@@ -1243,12 +1246,28 @@ class ServerApplication:
         handler: BaseHTTPRequestHandler,
         token_id: str,
     ) -> None:
-        credential = self._api_v1_require_bearer(handler, "tokens:write")
-        if credential is None:
-            return
+        identity = self._identity(handler)
+        if identity is not None and self._cookie(handler, APP_COOKIE):
+            if not self._csrf_valid(handler, identity, {}):
+                self._json(
+                    handler, 403,
+                    api_err("invalid_csrf", "A valid X-CSRF-Token header is required."),
+                    content_type="application/json; charset=utf-8",
+                )
+                return
+            user = self.database.get_or_create_user(
+                str(identity["sub"]),
+                str(identity.get("name") or identity["sub"]),
+            )
+            owner_user_id = int(user["id"])
+        else:
+            credential = self._api_v1_require_bearer(handler, "tokens:write")
+            if credential is None:
+                return
+            owner_user_id = int(credential["owner_user_id"])
 
         revoked = self.database.revoke_api_token(
-            int(credential["owner_user_id"]),
+            owner_user_id,
             token_id,
         )
         if not revoked:
@@ -1992,6 +2011,482 @@ class ServerApplication:
         except Exception:
             pass
 
+    def _developers(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
+        language = self._language(handler)
+        csrf = html.escape(str(identity["csrf"]))
+        vi = language == "vi"
+
+        title = "Cổng nhà phát triển & API" if vi else "Developer Portal & API"
+        eyebrow = "NHÀ PHÁT TRIỂN" if vi else "DEVELOPERS"
+        description = (
+            "Tạo, quản lý khóa API cá nhân và thử nghiệm trực tiếp các endpoint của Phenikaa Calendar API v1."
+            if vi else
+            "Create and manage personal API tokens, and interactively test Phenikaa Calendar API v1 endpoints."
+        )
+
+        tokens = self.database.list_api_tokens(int(user["id"]))
+        sessions = self.database.list_sessions(int(user["id"]))
+
+        # Build token list markup
+        token_rows = []
+        for t in tokens:
+            tid = html.escape(str(t["id"]))
+            tname = html.escape(str(t.get("name") or ("Khóa không tên" if vi else "Unnamed token")))
+            tprefix = html.escape(str(t.get("token_prefix") or "phk_***"))
+            tcreated = html.escape(str(t.get("created_at") or "")[:19].replace("T", " "))
+            tused = html.escape(str(t.get("last_used_at") or ("Chưa dùng" if vi else "Never"))[:19].replace("T", " "))
+            is_revoked = bool(t.get("revoked_at"))
+            status_badge = (
+                f'<span class="status status--needs_human">{"Đã thu hồi" if vi else "Revoked"}</span>'
+                if is_revoked else
+                f'<span class="status status--operational">{"Hoạt động" if vi else "Active"}</span>'
+            )
+            scopes_badge = " ".join(f'<code style="font-size:11px;padding:2px 6px;border-radius:6px;background:hsl(var(--muted)/0.5);">{html.escape(s)}</code>' for s in t.get("scopes", []))
+            revoke_btn = "" if is_revoked else f'<button type="button" class="button button--danger" style="min-height:36px;padding:4px 12px;" onclick="revokeToken(\'{tid}\')">{"Thu hồi" if vi else "Revoke"}</button>'
+            token_rows.append(f"""
+            <div class="managed-session" id="token-row-{tid}">
+              <div style="flex:1;min-width:240px;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                  <strong>{tname}</strong>
+                  {status_badge}
+                </div>
+                <p style="margin:2px 0;font-family:monospace;font-size:12px;color:hsl(var(--muted-foreground));">Prefix: <b>{tprefix}...</b> · ID: {tid}</p>
+                <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;">{scopes_badge}</div>
+                <p style="margin:6px 0 0 0;font-size:11px;color:hsl(var(--muted-foreground));">{"Tạo lúc" if vi else "Created"}: {tcreated} · {"Dùng lần cuối" if vi else "Last used"}: {tused}</p>
+              </div>
+              <div>{revoke_btn}</div>
+            </div>""")
+
+        token_list_html = "".join(token_rows) or f'<p class="text-muted" id="no-tokens-msg">{"Chưa có API token nào. Hãy tạo token đầu tiên bên dưới." if vi else "No API tokens yet. Create your first token below."}</p>'
+
+        # Session selector options for playground
+        session_options = "".join(
+            f'<option value="{html.escape(str(s["id"]))}">{html.escape(str(s.get("label") or s["id"]))} ({html.escape(str(s["id"])[:8])}...)</option>'
+            for s in sessions
+        )
+
+        body = f"""
+        {self._navigation(user, identity, "developers", language)}
+        <main>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">{eyebrow}</p>
+              <h2>{title}</h2>
+              <p class="page-description">{description} · <a href="/api/v1/openapi.json" target="_blank" style="text-decoration:underline;">OpenAPI Spec (JSON)</a></p>
+            </div>
+          </div>
+
+          <!-- Alert for newly created token secret -->
+          <div id="new-token-alert" style="display:none;margin-bottom:24px;padding:20px;border-radius:16px;background:hsl(142 76% 36% / 0.1);border:1px solid hsl(142 76% 36% / 0.3);">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+              <div>
+                <strong style="color:hsl(142 76% 36%);font-size:15px;display:block;margin-bottom:6px;">
+                  {'Tạo API Token thành công!' if vi else 'API Token Created Successfully!'}
+                </strong>
+                <p style="margin:0 0 10px 0;font-size:13px;color:hsl(var(--foreground));">
+                  {'Hãy sao chép và lưu token này ở nơi an toàn. Bạn sẽ KHÔNG thể xem lại khóa này sau khi đóng trang!' if vi else 'Copy and save this secret token now. You will NOT be able to see it again!'}
+                </p>
+                <div style="display:flex;align-items:center;gap:8px;max-width:650px;">
+                  <input type="text" id="new-token-value" readonly style="font-family:monospace;font-size:13px;background:white;color:black;width:100%;font-weight:bold;">
+                  <button type="button" class="button button--primary" id="btn-copy-token" onclick="copyToken()">{'Sao chép' if vi else 'Copy'}</button>
+                </div>
+              </div>
+              <button type="button" class="text-button" onclick="document.getElementById('new-token-alert').style.display='none'" style="font-size:20px;cursor:pointer;">&times;</button>
+            </div>
+          </div>
+
+          <!-- Section: API Tokens Management -->
+          <section class="settings-card" style="margin-bottom:24px;">
+            <p class="eyebrow">{'KHÓA TRUY CẬP' if vi else 'API KEYS'}</p>
+            <h2>{'Quản lý API Token' if vi else 'API Token Management'}</h2>
+            <div id="tokens-container" style="margin-top:16px;">
+              {token_list_html}
+            </div>
+
+            <!-- Create Token Form -->
+            <div style="border-top:1px solid hsl(var(--border));margin-top:20px;padding-top:20px;">
+              <h3 style="font-size:16px;margin:0 0 12px 0;">{'Tạo Token Mới' if vi else 'Create New Token'}</h3>
+              <form id="create-token-form" onsubmit="createToken(event)" style="display:grid;gap:16px;max-width:600px;">
+                <label>
+                  {'Tên gợi nhớ (Mô tả mục đích sử dụng)' if vi else 'Token Name / Description'}
+                  <input type="text" id="token-name" placeholder="e.g. CLI Sync, iOS Widget, Automation Script" maxlength="100" required>
+                </label>
+
+                <div>
+                  <span style="display:block;font-size:12px;font-weight:600;margin-bottom:8px;color:hsl(var(--muted-foreground));">
+                    {'Phân quyền (Scopes)' if vi else 'Permissions (Scopes)'}
+                  </span>
+                  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:8px;font-size:13px;">
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="me:read" checked style="min-h-0;min-height:auto;">
+                      <code>me:read</code> <small class="text-muted">({'Thông tin user' if vi else 'User info'})</small>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="sessions:read" checked style="min-h-0;min-height:auto;">
+                      <code>sessions:read</code> <small class="text-muted">({'Đọc phiên' if vi else 'View sessions'})</small>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="sessions:write" style="min-h-0;min-height:auto;">
+                      <code>sessions:write</code> <small class="text-muted">({'Sửa/xóa phiên' if vi else 'Modify sessions'})</small>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="events:read" checked style="min-h-0;min-height:auto;">
+                      <code>events:read</code> <small class="text-muted">({'Đọc lịch & file' if vi else 'Events & exports'})</small>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="sync:write" checked style="min-h-0;min-height:auto;">
+                      <code>sync:write</code> <small class="text-muted">({'Kích hoạt đồng bộ' if vi else 'Trigger sync'})</small>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="tokens:read" style="min-h-0;min-height:auto;">
+                      <code>tokens:read</code> <small class="text-muted">({'Xem danh sách token' if vi else 'List tokens'})</small>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;color:hsl(var(--foreground));">
+                      <input type="checkbox" name="scope" value="tokens:write" style="min-h-0;min-height:auto;">
+                      <code>tokens:write</code> <small class="text-muted">({'Thu hồi token' if vi else 'Revoke tokens'})</small>
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <button type="submit" class="button button--primary" id="btn-create-token">
+                    {'Tạo Token' if vi else 'Generate Token'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <!-- Section: Interactive API Playground -->
+          <section class="settings-card" style="margin-bottom:40px;">
+            <p class="eyebrow">{'PLAYGROUND & THỬ NGHIỆM' if vi else 'INTERACTIVE PLAYGROUND'}</p>
+            <h2>{'Trình chạy thử API trực tiếp' if vi else 'Live API Test Console'}</h2>
+            <p class="text-muted" style="margin-bottom:16px;">
+              {'Chọn endpoint, truyền token và tham số để gửi yêu cầu và nhận kết quả phản hồi thực tế từ máy chủ.' if vi else 'Select an endpoint, supply a token and parameters to execute live requests directly against the server.'}
+            </p>
+
+            <div style="display:grid;gap:16px;">
+              <!-- Endpoint Selector -->
+              <div class="field-group">
+                <label>
+                  Endpoint
+                  <select id="play-endpoint" onchange="onEndpointChange()" style="min-height:44px;border-radius:12px;border:1px solid hsl(var(--border));padding:0 12px;background:hsl(var(--card));font-family:monospace;font-size:13px;">
+                    <option value="GET /api/v1/me">GET /api/v1/me (Token Profile)</option>
+                    <option value="GET /api/v1/tokens">GET /api/v1/tokens (List Tokens)</option>
+                    <option value="GET /api/v1/sessions">GET /api/v1/sessions (List Sessions)</option>
+                    <option value="GET /api/v1/sessions/{{sessionId}}">GET /api/v1/sessions/{{sessionId}} (Session Detail)</option>
+                    <option value="GET /api/v1/sessions/{{sessionId}}/events">GET /api/v1/sessions/{{sessionId}}/events (Filter Events)</option>
+                    <option value="GET /api/v1/sessions/{{sessionId}}/exports">GET /api/v1/sessions/{{sessionId}}/exports (List Exports)</option>
+                    <option value="POST /api/v1/sessions/{{sessionId}}/sync">POST /api/v1/sessions/{{sessionId}}/sync (Trigger Sync)</option>
+                    <option value="GET /api/v1/sessions/{{sessionId}}/sync/runs">GET /api/v1/sessions/{{sessionId}}/sync/runs (Sync Runs)</option>
+                    <option value="GET /api/v1/health">GET /api/v1/health (Public Health)</option>
+                    <option value="GET /api/v1/status">GET /api/v1/status (Public Service Status)</option>
+                    <option value="POST /api/v1/export/one-shot">POST /api/v1/export/one-shot (One-Shot Export)</option>
+                  </select>
+                </label>
+
+                <label>
+                  {'Token Bearer sử dụng' if vi else 'Authorization Token'}
+                  <input type="text" id="play-token" placeholder="phk_..." style="font-family:monospace;font-size:13px;" oninput="updateSnippets()">
+                </label>
+              </div>
+
+              <!-- Dynamic Parameters Container -->
+              <div id="play-params" style="display:grid;gap:12px;">
+                <!-- Session Id Picker (shown for session endpoints) -->
+                <div id="group-session-id" style="display:none;">
+                  <label>
+                    Session ID
+                    <div style="display:flex;gap:8px;">
+                      <select id="play-session-select" onchange="document.getElementById('play-session-id').value = this.value; updateSnippets();" style="border-radius:12px;border:1px solid hsl(var(--border));padding:0 10px;background:hsl(var(--card));">
+                        <option value="">-- {'Chọn phiên của bạn' if vi else 'Select your session'} --</option>
+                        {session_options}
+                      </select>
+                      <input type="text" id="play-session-id" placeholder="sessionId" style="font-family:monospace;font-size:13px;flex:1;" oninput="updateSnippets()">
+                    </div>
+                  </label>
+                </div>
+
+                <!-- Query params: Date range for events -->
+                <div id="group-events-range" style="display:none;" class="field-group">
+                  <label>
+                    {'Từ ngày (start)' if vi else 'Start date'}
+                    <input type="date" id="play-start-date" value="2026-08-24" onchange="updateSnippets()">
+                  </label>
+                  <label>
+                    {'Đến ngày (end)' if vi else 'End date'}
+                    <input type="date" id="play-end-date" value="2027-01-31" onchange="updateSnippets()">
+                  </label>
+                </div>
+
+                <!-- Request Body (JSON) -->
+                <div id="group-body" style="display:none;">
+                  <label>
+                    Request Body (JSON)
+                    <textarea id="play-body" style="font-family:monospace;font-size:12px;min-height:100px;" oninput="updateSnippets()"></textarea>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Action button -->
+              <div style="display:flex;gap:12px;align-items:center;">
+                <button type="button" class="button button--primary" id="btn-run-request" onclick="executePlayground()">
+                  {'Gửi Yêu Cầu (Run)' if vi else 'Send Request'}
+                </button>
+                <span id="play-loading" style="display:none;font-size:12px;color:hsl(var(--muted-foreground));">
+                  <i class="fas fa-spinner fa-spin"></i> {'Đang gửi...' if vi else 'Sending...'}
+                </span>
+                <span id="play-status-badge" style="display:none;"></span>
+                <span id="play-time" style="font-size:12px;color:hsl(var(--muted-foreground));"></span>
+              </div>
+
+              <!-- Result View -->
+              <div id="play-result-wrapper" style="display:none;">
+                <label>
+                  {'Kết quả phản hồi (Response)' if vi else 'Response Output'}
+                  <pre id="play-response" style="background:#0f172a;color:#f8fafc;padding:16px;border-radius:12px;font-family:monospace;font-size:12px;overflow-x:auto;max-height:400px;white-space:pre-wrap;margin:0;"></pre>
+                </label>
+              </div>
+
+              <!-- Code Snippets (cURL & Fetch) -->
+              <div style="border-top:1px solid hsl(var(--border));padding-top:16px;margin-top:8px;">
+                <p class="eyebrow">{'MÃ NGUỒN MẪU' if vi else 'CODE SNIPPETS'}</p>
+                <div style="display:grid;gap:12px;">
+                  <div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                      <span style="font-size:12px;font-weight:600;color:hsl(var(--muted-foreground));">cURL</span>
+                      <button type="button" class="text-button" onclick="navigator.clipboard.writeText(document.getElementById('snippet-curl').innerText);this.innerText='Copied!';setTimeout(()=>this.innerText='Copy', 1500)">Copy</button>
+                    </div>
+                    <pre id="snippet-curl" style="background:#1e293b;color:#e2e8f0;padding:12px;border-radius:10px;font-family:monospace;font-size:11px;overflow-x:auto;margin:0;white-space:pre-wrap;"></pre>
+                  </div>
+
+                  <div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                      <span style="font-size:12px;font-weight:600;color:hsl(var(--muted-foreground));">JavaScript (fetch)</span>
+                      <button type="button" class="text-button" onclick="navigator.clipboard.writeText(document.getElementById('snippet-fetch').innerText);this.innerText='Copied!';setTimeout(()=>this.innerText='Copy', 1500)">Copy</button>
+                    </div>
+                    <pre id="snippet-fetch" style="background:#1e293b;color:#e2e8f0;padding:12px;border-radius:10px;font-family:monospace;font-size:11px;overflow-x:auto;margin:0;white-space:pre-wrap;"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <script>
+        const CSRF_TOKEN = "{csrf}";
+
+        async function createToken(e) {{
+          e.preventDefault();
+          const name = document.getElementById('token-name').value.trim();
+          const scopeBoxes = document.querySelectorAll('input[name="scope"]:checked');
+          const scopes = Array.from(scopeBoxes).map(b => b.value);
+          const btn = document.getElementById('btn-create-token');
+          btn.disabled = true;
+          try {{
+            const resp = await fetch('/api/v1/tokens', {{
+              method: 'POST',
+              headers: {{
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': CSRF_TOKEN
+              }},
+              body: JSON.stringify({{ name, scopes }})
+            }});
+            const res = await resp.json();
+            if (res.ok) {{
+              const data = res.data;
+              document.getElementById('new-token-value').value = data.token;
+              document.getElementById('new-token-alert').style.display = 'block';
+              document.getElementById('play-token').value = data.token;
+              updateSnippets();
+              document.getElementById('token-name').value = '';
+              // Reload page to reflect updated token list
+              setTimeout(() => {{ window.location.reload(); }}, 3000);
+            }} else {{
+              alert('Lỗi tạo token: ' + (res.error?.message || 'Không rõ nguyên nhân'));
+            }}
+          }} catch(err) {{
+            alert('Lỗi mạng: ' + err.message);
+          }} finally {{
+            btn.disabled = false;
+          }}
+        }}
+
+        function copyToken() {{
+          const inp = document.getElementById('new-token-value');
+          inp.select();
+          navigator.clipboard.writeText(inp.value);
+          const btn = document.getElementById('btn-copy-token');
+          btn.innerText = '{"Đã chép!" if vi else "Copied!"}';
+          setTimeout(() => {{ btn.innerText = '{"Sao chép" if vi else "Copy"}'; }}, 2000);
+        }}
+
+        async function revokeToken(tokenId) {{
+          if (!confirm('{"Bạn có chắc chắn muốn thu hồi token này?" if vi else "Are you sure you want to revoke this token?"}')) return;
+          try {{
+            const resp = await fetch('/api/v1/tokens/' + encodeURIComponent(tokenId) + '/revoke', {{
+              method: 'POST',
+              headers: {{
+                'X-CSRF-Token': CSRF_TOKEN
+              }}
+            }});
+            const res = await resp.json();
+            if (res.ok) {{
+              const row = document.getElementById('token-row-' + tokenId);
+              if (row) {{
+                row.querySelector('button')?.remove();
+                const badge = row.querySelector('.status');
+                if (badge) {{
+                  badge.className = 'status status--needs_human';
+                  badge.innerText = '{"Đã thu hồi" if vi else "Revoked"}';
+                }}
+              }}
+            }} else {{
+              alert('Lỗi: ' + (res.error?.message || 'Không thể thu hồi'));
+            }}
+          }} catch(err) {{
+            alert('Lỗi kết nối: ' + err.message);
+          }}
+        }}
+
+        function onEndpointChange() {{
+          const ep = document.getElementById('play-endpoint').value;
+          const [method, route] = ep.split(' ');
+          const hasSession = route.includes('{{sessionId}}');
+          const isEvents = route.includes('/events');
+          const isOneShot = route.includes('one-shot');
+
+          document.getElementById('group-session-id').style.display = hasSession ? 'block' : 'none';
+          document.getElementById('group-events-range').style.display = isEvents ? 'grid' : 'none';
+          document.getElementById('group-body').style.display = isOneShot ? 'block' : 'none';
+
+          if (isOneShot) {{
+            document.getElementById('play-body').value = JSON.stringify({{
+              start: "2026-08-24",
+              end: "2027-01-31",
+              userId: "YOUR_USER_ID",
+              tokenJWT: "YOUR_TOKEN"
+            }}, null, 2);
+          }}
+          updateSnippets();
+        }}
+
+        function getBuiltUrlAndOptions() {{
+          const ep = document.getElementById('play-endpoint').value;
+          const [method, routeTemplate] = ep.split(' ');
+          const sid = document.getElementById('play-session-id').value.trim() || 'SESSION_ID';
+          let path = routeTemplate.replace('{{sessionId}}', sid);
+
+          if (path.includes('/events')) {{
+            const st = document.getElementById('play-start-date').value;
+            const en = document.getElementById('play-end-date').value;
+            path += `?start=${{encodeURIComponent(st)}}&end=${{encodeURIComponent(en)}}`;
+          }}
+
+          const token = document.getElementById('play-token').value.trim();
+          const headers = {{}};
+          if (token) {{
+            headers['Authorization'] = `Bearer ${{token}}`;
+          }}
+
+          let body = null;
+          if (method === 'POST' && path.includes('one-shot')) {{
+            headers['Content-Type'] = 'application/json';
+            body = document.getElementById('play-body').value;
+          }}
+
+          return {{ method, path, headers, body }};
+        }}
+
+        function updateSnippets() {{
+          const {{ method, path, headers, body }} = getBuiltUrlAndOptions();
+          const fullUrl = window.location.origin + path;
+
+          // cURL snippet
+          let curl = `curl -X ${{method}} "${{fullUrl}}"`;
+          for (const [k, v] of Object.entries(headers)) {{
+            curl += ` \\\n  -H "${{k}}: ${{v}}"`;
+          }}
+          if (body) {{
+            curl += ` \\\n  -d '${{body.replace(/'/g, "'\\''")}}'`
+          }}
+          document.getElementById('snippet-curl').innerText = curl;
+
+          // Fetch snippet
+          let fetchCode = `const resp = await fetch("${{path}}", {{\n  method: "${{method}}",\n`;
+          if (Object.keys(headers).length > 0) {{
+            fetchCode += `  headers: ${{\n`;
+            for (const [k, v] of Object.entries(headers)) {{
+              fetchCode += `    "${{k}}": "${{v}}",\n`;
+            }}
+            fetchCode += `  }},\n`;
+          }}
+          if (body) {{
+            fetchCode += `  body: JSON.stringify(${{body}}),\n`;
+          }}
+          fetchCode += `}});\nconst data = await resp.json();\nconsole.log(data);`;
+          document.getElementById('snippet-fetch').innerText = fetchCode;
+        }}
+
+        async function executePlayground() {{
+          const {{ method, path, headers, body }} = getBuiltUrlAndOptions();
+          const btn = document.getElementById('btn-run-request');
+          const loading = document.getElementById('play-loading');
+          const badge = document.getElementById('play-status-badge');
+          const timeSpan = document.getElementById('play-time');
+          const out = document.getElementById('play-response');
+          const wrapper = document.getElementById('play-result-wrapper');
+
+          btn.disabled = true;
+          loading.style.display = 'inline-block';
+          badge.style.display = 'none';
+          timeSpan.innerText = '';
+          wrapper.style.display = 'block';
+          out.innerText = '{"Đang tải..." if vi else "Loading..."}';
+
+          const startTime = performance.now();
+          try {{
+            const fetchOpts = {{ method, headers }};
+            if (body && method !== 'GET') {{
+              fetchOpts.body = body;
+            }}
+            const resp = await fetch(path, fetchOpts);
+            const duration = Math.round(performance.now() - startTime);
+            timeSpan.innerText = `${{duration}} ms`;
+
+            badge.style.display = 'inline-block';
+            badge.innerText = `HTTP ${{resp.status}}`;
+            badge.className = resp.ok ? 'status status--operational' : 'status status--needs_human';
+
+            const ctype = resp.headers.get('content-type') || '';
+            if (ctype.includes('application/json')) {{
+              const data = await resp.json();
+              out.innerText = JSON.stringify(data, null, 2);
+            }} else {{
+              const text = await resp.text();
+              out.innerText = text;
+            }}
+          }} catch(err) {{
+            const duration = Math.round(performance.now() - startTime);
+            timeSpan.innerText = `${{duration}} ms`;
+            badge.style.display = 'inline-block';
+            badge.innerText = 'ERROR';
+            badge.className = 'status status--needs_human';
+            out.innerText = 'Network Error: ' + err.message;
+          }} finally {{
+            btn.disabled = false;
+            loading.style.display = 'none';
+          }}
+        }}
+
+        // Initialize snippets on page load
+        document.addEventListener('DOMContentLoaded', () => {{
+          onEndpointChange();
+        }});
+        </script>
+        """
+        self._html(handler, 200, self._layout("Developer Portal" if not vi else "Cổng nhà phát triển", body), no_store=True)
+
     def _settings(self, handler: BaseHTTPRequestHandler, user: dict[str, Any], identity: dict[str, Any]) -> None:
         language = self._language(handler)
         csrf = html.escape(str(identity["csrf"]))
@@ -2042,15 +2537,17 @@ class ServerApplication:
         vi = language == "vi"
         export_label = "Tạo lịch nhanh" if vi else "Quick export"
         dashboard_label = "Bảng điều khiển" if language == "vi" else "Dashboard"
+        developers_label = "Nhà phát triển" if vi else "Developers"
         status_label = "Trạng thái máy chủ" if vi else "Server status"
         settings_label = "Cài đặt" if language == "vi" else "Settings"
         sign_out = "Đăng xuất" if language == "vi" else "Sign out"
         about_label = "Giới thiệu" if vi else "About"
         active_export = " nav-link--active" if active == "export" else ""
         active_dashboard = " nav-link--active" if active == "dashboard" else ""
+        active_developers = " nav-link--active" if active == "developers" else ""
         active_status = " nav-link--active" if active == "status" else ""
         active_settings = " nav-link--active" if active == "settings" else ""
-        target = {"export": "/", "dashboard": "/dashboard", "about": "/about", "settings": "/settings", "status": "/status"}.get(active, "/")
+        target = {"export": "/", "dashboard": "/dashboard", "developers": "/developers", "about": "/about", "settings": "/settings", "status": "/status"}.get(active, "/")
         language_links = f"<a class=\"language-option{' language-option--active' if language == 'vi' else ''}\" href=\"/language?lang=vi&return={urllib.parse.quote(target)}\">VI</a><a class=\"language-option{' language-option--active' if language == 'en' else ''}\" href=\"/language?lang=en&return={urllib.parse.quote(target)}\">EN</a>"
         account = ""
         if user is not None and identity is not None:
@@ -2060,7 +2557,8 @@ class ServerApplication:
             login_label = ('Đăng nhập bằng Google' if vi else 'Sign in with Google') if self.config.auth_mode == 'google' else ('Đăng nhập' if vi else 'Sign in')
             account = f"<a class=\"button button--primary\" href=\"/auth/login\">{login_label}</a>"
         dashboard = f'<a class="nav-link{active_dashboard}" href="/dashboard">{dashboard_label}</a>' if user is not None else f'<a class="nav-link" href="/dashboard">{dashboard_label}</a>'
-        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}<a class="nav-link{active_status}" href="/status">{status_label}</a><a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
+        developers = f'<a class="nav-link{active_developers}" href="/developers">{developers_label}</a>' if user is not None else ''
+        return f"""<header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><nav class="app-nav"><a class="nav-link{active_export}" href="/">{export_label}</a>{dashboard}{developers}<a class="nav-link{active_status}" href="/status">{status_label}</a><a class="nav-link{' nav-link--active' if active == 'about' else ''}" href="/about">{about_label}</a></nav><div class="header-meta"><div class="language-toggle">{language_links}</div>{account}</div></header>"""
 
     def _language(self, handler: BaseHTTPRequestHandler) -> str:
         return "vi" if self._cookie(handler, LANGUAGE_COOKIE) == "vi" else "en"
