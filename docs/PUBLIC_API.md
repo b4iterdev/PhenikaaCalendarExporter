@@ -21,6 +21,9 @@ application session cookie plus a valid `X-CSRF-Token` header.
 The token secret is returned only once. Store it securely. The database stores
 a SHA-256 hash rather than the raw token. Revoked tokens can no longer be used.
 
+Tokens can also be generated, copied, and revoked visually via the Developer Portal
+at `/developers` in the web application.
+
 Supported scopes:
 
 - `me:read`

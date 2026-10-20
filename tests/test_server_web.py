@@ -1073,6 +1073,28 @@ class WebSmokeTests(unittest.TestCase):
             finally:
                 self._stop_app(database, server, thread)
 
+    def test_developers_portal_page_and_navigation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
+            try:
+                # Unauthenticated in development mode still maps to local dev user
+                status, _headers, body = self._request(server, "GET", "/developers")
+                self.assertEqual(status, 200)
+                self.assertIn(b"Developer Portal", body)
+                self.assertIn(b"Live API Test Console", body)
+                self.assertIn(b"/api/v1/tokens", body)
+                self.assertIn(b"href=\"/developers\"", body)
+
+                # Vietnamese toggle
+                status, _headers, body_vi = self._request(
+                    server, "GET", "/developers", headers={"Cookie": "phenikaa_ui_language=vi"}
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("Nhà phát triển".encode("utf-8"), body_vi)
+                self.assertIn("Quản lý API Token".encode("utf-8"), body_vi)
+            finally:
+                self._stop_app(database, server, thread)
+
     def test_settings_language_toggle_and_account_deletion(self):
         with tempfile.TemporaryDirectory() as directory:
             _config, database, _signed_sessions, _sync, server, thread = self._start_app(directory)
