@@ -30,6 +30,7 @@ def silent_refresh(
     portal_url: str = PORTAL_CALENDAR_URL,
     launch_context: Callable[..., Any] | None = None,
     no_sandbox: bool = False,
+    old_token: str | None = None,
 ) -> dict[str, Any]:
     """Recapture credentials from a logged-in profile, headlessly.
 
@@ -61,6 +62,8 @@ def silent_refresh(
             for key in ("userId", "tokenJWT"):
                 value = candidate.get(key)
                 if value:
+                    if key == "tokenJWT" and old_token and str(value) == str(old_token):
+                        continue
                     session[key] = str(value)
 
     args = ["--no-sandbox"] if no_sandbox else []
@@ -71,6 +74,10 @@ def silent_refresh(
         context, playwright_owner = launched, None
     try:
         page = context.pages[0] if context.pages else context.new_page()
+        try:
+            page.set_extra_http_headers({"Cache-Control": "no-cache", "Pragma": "no-cache"})
+        except Exception:
+            pass
 
         def on_response(response: Any) -> None:
             try:
@@ -89,7 +96,7 @@ def silent_refresh(
                 token = token_from_authorization(request.header_value("authorization"))
             except Exception:
                 return
-            if token:
+            if token and (not old_token or token != old_token):
                 session["tokenJWT"] = token
 
         page.on("response", on_response)
