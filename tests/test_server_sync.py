@@ -85,6 +85,28 @@ class SyncEngineTests(unittest.TestCase):
             self.assertEqual(vault.decrypt(stored["token_encrypted"]), "new-token")
             database.close()
 
+    def test_refresher_receives_old_token_to_bypass_stale_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, database, vault, session_id = self.make_session(directory)
+            received_old_token = []
+
+            def fetch(auth, *_args):
+                if auth["tokenJWT"] == "old-token":
+                    raise PermissionError("expired")
+                return [SAMPLE_EVENT]
+
+            def refresh(profile_dir, *, old_token=None, **_kwargs):
+                received_old_token.append(old_token)
+                return {"userId": "student-id", "tokenJWT": "fresh-token"}
+
+            engine = SyncEngine(config, database, vault, fetcher=fetch, refresher=refresh)
+            stored = database.get_session(session_id)
+            assert stored is not None
+            result = engine.sync_session(stored)
+            self.assertTrue(result.ok)
+            self.assertEqual(received_old_token, ["old-token"])
+            database.close()
+
     def test_failed_refresh_requires_human(self):
         with tempfile.TemporaryDirectory() as directory:
             config, database, vault, session_id = self.make_session(directory)

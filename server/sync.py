@@ -122,11 +122,20 @@ class SyncEngine:
                 events = self.fetcher(auth, start, end)
             except PermissionError:
                 profile_dir = self.config.profiles_dir / session_id
-                auth = self.refresher(
-                    profile_dir,
-                    timeout=self.config.refresh_timeout,
-                    no_sandbox=self.config.browser_no_sandbox,
-                )
+                old_token = auth.get("tokenJWT")
+                try:
+                    auth = self.refresher(
+                        profile_dir,
+                        timeout=self.config.refresh_timeout,
+                        no_sandbox=self.config.browser_no_sandbox,
+                        old_token=old_token,
+                    )
+                except TypeError:
+                    auth = self.refresher(
+                        profile_dir,
+                        timeout=self.config.refresh_timeout,
+                        no_sandbox=self.config.browser_no_sandbox,
+                    )
                 token = str(auth["tokenJWT"])
                 self.database.update_session_credentials(
                     session_id,

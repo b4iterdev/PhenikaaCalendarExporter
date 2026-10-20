@@ -130,7 +130,13 @@ def fetch_calendar(
         headers={
             "Authorization": "Bearer " + str(token),
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Accept": "application/json",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
             "Origin": PORTAL_BASE_URL,
             "Referer": PORTAL_BASE_URL + "/congsinhvien/index.aspx",
         },
