@@ -2,10 +2,10 @@ name: Build server image
 
 on:
   push:
-    branches: [main, "dev/**"]
+    branches: [main, dev, "dev/**"]
     paths: ["server/**", "frontend/**", "phenikaa_exporter.py", "phenikaa_login.py", "pyproject.toml", "package.json", "package-lock.json", "tailwind.config.js", "Dockerfile", ".dockerignore", ".github/workflows/docker.yml"]
   pull_request:
-    branches: [main, "dev/**"]
+    branches: [main, dev, "dev/**"]
     paths: ["server/**", "frontend/**", "phenikaa_exporter.py", "phenikaa_login.py", "pyproject.toml", "package.json", "package-lock.json", "tailwind.config.js", "Dockerfile", ".dockerignore", ".github/workflows/docker.yml"]
   workflow_dispatch:
 
@@ -81,7 +81,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -93,7 +93,7 @@ jobs:
           repository: b4iterdev/cluster-config
           ref: main
           token: ${{ secrets.CLUSTER_CONFIG_TOKEN }}
-      - name: Update production image digest
+      - name: Update cluster deployment image digest
         env:
           IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
         run: |
@@ -102,23 +102,32 @@ jobs:
             printf 'Invalid image digest\n' >&2
             exit 1
           fi
-          manifest=clusters/production/pca/deployment.json
           image="${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
-          jq -e '
-            .kind == "Deployment" and
-            .metadata.name == "phenikaa-server" and
-            .metadata.namespace == "pca" and
-            ([.spec.template.spec.containers[] | select(.name == "server")] | length == 1)
-          ' "$manifest" > /dev/null
-          jq --arg image "$image" '
-            (.spec.template.spec.containers[] | select(.name == "server") | .image) = $image
-          ' "$manifest" > "$manifest.tmp"
-          mv "$manifest.tmp" "$manifest"
-          git add "$manifest"
-          if git diff --cached --quiet; then
-            exit 0
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            manifest=clusters/production/pca/deployment.json
+            name="phenikaa-server"
+            ns="pca"
+          else
+            manifest=clusters/production/pca-dev/deployment.json
+            name="phenikaa-server-dev"
+            ns="dev"
           fi
-          git -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Deploy Phenikaa image ${IMAGE_DIGEST}"
-          git push origin HEAD:main
+          if [ -f "$manifest" ]; then
+            jq -e --arg name "$name" --arg ns "$ns" '
+              .kind == "Deployment" and
+              .metadata.name == $name and
+              .metadata.namespace == $ns and
+              ([.spec.template.spec.containers[] | select(.name == "server")] | length == 1)
+            ' "$manifest" > /dev/null
+            jq --arg image "$image" '
+              (.spec.template.spec.containers[] | select(.name == "server") | .image) = $image
+            ' "$manifest" > "$manifest.tmp"
+            mv "$manifest.tmp" "$manifest"
+            git add "$manifest"
+            if ! git diff --cached --quiet; then
+              git -c user.name='github-actions[bot]' \
+                -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                commit -m "Deploy Phenikaa image ${IMAGE_DIGEST} (${name})"
+              git push origin HEAD:main
+            fi
+          fi
