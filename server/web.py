@@ -2171,16 +2171,16 @@ class ServerApplication:
                 <label>
                   Endpoint
                   <select id="play-endpoint" onchange="onEndpointChange()" style="min-height:44px;border-radius:12px;border:1px solid hsl(var(--border));padding:0 12px;background:hsl(var(--card));font-family:monospace;font-size:13px;">
-                    <option value="GET /api/v1/me">GET /api/v1/me (Token Profile)</option>
-                    <option value="GET /api/v1/tokens">GET /api/v1/tokens (List Tokens)</option>
-                    <option value="GET /api/v1/sessions">GET /api/v1/sessions (List Sessions)</option>
+                    <option value="GET /api/v1/health">GET /api/v1/health (Public Health - Không cần token)</option>
+                    <option value="GET /api/v1/status">GET /api/v1/status (Public Service Status - Không cần token)</option>
+                    <option value="GET /api/v1/me">GET /api/v1/me (Token Profile - Quyền me:read)</option>
+                    <option value="GET /api/v1/tokens">GET /api/v1/tokens (List Tokens - Quyền tokens:read)</option>
+                    <option value="GET /api/v1/sessions">GET /api/v1/sessions (List Sessions - Quyền sessions:read)</option>
                     <option value="GET /api/v1/sessions/{{sessionId}}">GET /api/v1/sessions/{{sessionId}} (Session Detail)</option>
                     <option value="GET /api/v1/sessions/{{sessionId}}/events">GET /api/v1/sessions/{{sessionId}}/events (Filter Events)</option>
                     <option value="GET /api/v1/sessions/{{sessionId}}/exports">GET /api/v1/sessions/{{sessionId}}/exports (List Exports)</option>
                     <option value="POST /api/v1/sessions/{{sessionId}}/sync">POST /api/v1/sessions/{{sessionId}}/sync (Trigger Sync)</option>
                     <option value="GET /api/v1/sessions/{{sessionId}}/sync/runs">GET /api/v1/sessions/{{sessionId}}/sync/runs (Sync Runs)</option>
-                    <option value="GET /api/v1/health">GET /api/v1/health (Public Health)</option>
-                    <option value="GET /api/v1/status">GET /api/v1/status (Public Service Status)</option>
                     <option value="POST /api/v1/export/one-shot">POST /api/v1/export/one-shot (One-Shot Export)</option>
                   </select>
                 </label>
@@ -2343,7 +2343,13 @@ class ServerApplication:
         function copyToken() {{
           const inp = document.getElementById('new-token-value');
           inp.select();
-          navigator.clipboard.writeText(inp.value);
+          if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(inp.value).catch(() => {{
+              document.execCommand('copy');
+            }});
+          }} else {{
+            document.execCommand('copy');
+          }}
           const btn = document.getElementById('btn-copy-token');
           btn.innerText = '{"Đã chép!" if vi else "Copied!"}';
           setTimeout(() => {{ btn.innerText = '{"Sao chép" if vi else "Copy"}'; }}, 2000);
@@ -2470,7 +2476,8 @@ class ServerApplication:
           badge.style.display = 'none';
           timeSpan.innerText = '';
           wrapper.style.display = 'block';
-          out.innerText = '{"Đang tải..." if vi else "Loading..."}';
+          wrapper.scrollIntoView({{ behavior: 'smooth' }});
+          out.innerText = '{"Đang gửi..." if vi else "Sending request..."}';
 
           const startTime = performance.now();
           try {{
