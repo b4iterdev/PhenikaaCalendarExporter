@@ -2433,33 +2433,36 @@ class ServerApplication:
         }}
 
         function updateSnippets() {{
-          const {{ method, path, headers, body }} = getBuiltUrlAndOptions();
-          const fullUrl = window.location.origin + path;
+          const info = getBuiltUrlAndOptions();
+          const fullUrl = window.location.origin + info.path;
+          const NL = String.fromCharCode(10);
 
           // cURL snippet
-          let curl = `curl -X ${{method}} "${{fullUrl}}"`;
-          for (const [k, v] of Object.entries(headers)) {{
-            curl += ` \\\n  -H "${{k}}: ${{v}}"`;
+          const curlLines = ['curl -X ' + info.method + ' "' + fullUrl + '"'];
+          for (const [k, v] of Object.entries(info.headers)) {{
+            curlLines.push('  -H "' + k + ': ' + v + '"');
           }}
-          if (body) {{
-            curl += ` \\\n  -d '${{body.replace(/'/g, "'\\''")}}'`
+          if (info.body) {{
+            curlLines.push('  -d ' + JSON.stringify(info.body));
           }}
-          document.getElementById('snippet-curl').innerText = curl;
+          const BS = String.fromCharCode(92);
+          document.getElementById('snippet-curl').innerText = curlLines.join(' ' + BS + NL);
 
           // Fetch snippet
-          let fetchCode = `const resp = await fetch("${{path}}", {{\n  method: "${{method}}",\n`;
-          if (Object.keys(headers).length > 0) {{
-            fetchCode += `  headers: ${{\n`;
-            for (const [k, v] of Object.entries(headers)) {{
-              fetchCode += `    "${{k}}": "${{v}}",\n`;
-            }}
-            fetchCode += `  }},\n`;
+          const fetchLines = [
+            'const resp = await fetch("' + info.path + '", {{',
+            '  method: "' + info.method + '",'
+          ];
+          if (Object.keys(info.headers).length > 0) {{
+            fetchLines.push('  headers: ' + JSON.stringify(info.headers, null, 2) + ',');
           }}
-          if (body) {{
-            fetchCode += `  body: JSON.stringify(${{body}}),\n`;
+          if (info.body) {{
+            fetchLines.push('  body: JSON.stringify(' + info.body + '),');
           }}
-          fetchCode += `}});\nconst data = await resp.json();\nconsole.log(data);`;
-          document.getElementById('snippet-fetch').innerText = fetchCode;
+          fetchLines.push('}});');
+          fetchLines.push('const data = await resp.json();');
+          fetchLines.push('console.log(data);');
+          document.getElementById('snippet-fetch').innerText = fetchLines.join(NL);
         }}
 
         async function executePlayground() {{
