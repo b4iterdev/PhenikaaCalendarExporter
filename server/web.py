@@ -2077,9 +2077,9 @@ class ServerApplication:
           </div>
 
           <!-- Alert for newly created token secret -->
-          <div id="new-token-alert" style="display:none;margin-bottom:24px;padding:20px;border-radius:16px;background:hsl(142 76% 36% / 0.1);border:1px solid hsl(142 76% 36% / 0.3);">
+          <div id="new-token-alert" style="display:none;margin-bottom:24px;padding:20px;border-radius:16px;background:hsl(142 76% 36% / 0.15);border:1px solid hsl(142 76% 36% / 0.5);">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
-              <div>
+              <div style="flex:1;">
                 <strong style="color:hsl(142 76% 36%);font-size:15px;display:block;margin-bottom:6px;">
                   {'Tạo API Token thành công!' if vi else 'API Token Created Successfully!'}
                 </strong>
@@ -2087,7 +2087,7 @@ class ServerApplication:
                   {'Hãy sao chép và lưu token này ở nơi an toàn. Bạn sẽ KHÔNG thể xem lại khóa này sau khi đóng trang!' if vi else 'Copy and save this secret token now. You will NOT be able to see it again!'}
                 </p>
                 <div style="display:flex;align-items:center;gap:8px;max-width:650px;">
-                  <input type="text" id="new-token-value" readonly style="font-family:monospace;font-size:13px;background:white;color:black;width:100%;font-weight:bold;">
+                  <input type="text" id="new-token-value" readonly style="font-family:monospace;font-size:13px;background:hsl(var(--card));color:hsl(var(--foreground));width:100%;font-weight:bold;padding:8px 12px;border-radius:8px;border:1px solid hsl(var(--border));">
                   <button type="button" class="button button--primary" id="btn-copy-token" onclick="copyToken()">{'Sao chép' if vi else 'Copy'}</button>
                 </div>
               </div>
@@ -2295,13 +2295,41 @@ class ServerApplication:
             const res = await resp.json();
             if (res.ok) {{
               const data = res.data;
-              document.getElementById('new-token-value').value = data.token;
-              document.getElementById('new-token-alert').style.display = 'block';
+              const alertBox = document.getElementById('new-token-alert');
+              const valInput = document.getElementById('new-token-value');
+              valInput.value = data.token;
+              alertBox.style.display = 'block';
+              alertBox.scrollIntoView({{ behavior: 'smooth' }});
+
               document.getElementById('play-token').value = data.token;
               updateSnippets();
               document.getElementById('token-name').value = '';
-              // Reload page to reflect updated token list
-              setTimeout(() => {{ window.location.reload(); }}, 3000);
+
+              // Append new token item directly to list without page reload
+              const container = document.getElementById('tokens-container');
+              const emptyMsg = document.getElementById('no-tokens-msg');
+              if (emptyMsg) emptyMsg.remove();
+
+              const newRow = document.createElement('div');
+              newRow.className = 'managed-session';
+              newRow.id = 'token-row-' + data.id;
+              newRow.innerHTML = `
+                <div style="flex:1;min-width:240px;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                    <strong>${{data.name || 'API Token'}}</strong>
+                    <span class="status status--operational">{'Hoạt động' if vi else 'Active'}</span>
+                  </div>
+                  <p style="margin:2px 0;font-family:monospace;font-size:12px;color:hsl(var(--muted-foreground));">Prefix: <b>${{data.token.slice(0, 12)}}...</b> · ID: ${{data.id}}</p>
+                  <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;">
+                    ${{data.scopes.map(s => '<code style="font-size:11px;padding:2px 6px;border-radius:6px;background:hsl(var(--muted)/0.5);">' + s + '</code>').join(' ')}}
+                  </div>
+                  <p style="margin:6px 0 0 0;font-size:11px;color:hsl(var(--muted-foreground));">{'Vừa tạo xong' if vi else 'Just created'}</p>
+                </div>
+                <div>
+                  <button type="button" class="button button--danger" style="min-height:36px;padding:4px 12px;" onclick="revokeToken('${{data.id}}')">{'Thu hồi' if vi else 'Revoke'}</button>
+                </div>
+              `;
+              container.prepend(newRow);
             }} else {{
               alert('Lỗi tạo token: ' + (res.error?.message || 'Không rõ nguyên nhân'));
             }}
