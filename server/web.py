@@ -2065,6 +2065,24 @@ class ServerApplication:
             for s in sessions
         )
 
+        endpoints_meta = [
+            ("GET /api/v1/health", "GET /api/v1/health (Kiểm tra hoạt động · Không cần token)" if vi else "GET /api/v1/health (Public Health · No token)"),
+            ("GET /api/v1/status", "GET /api/v1/status (Trạng thái dịch vụ · Không cần token)" if vi else "GET /api/v1/status (Service Status · No token)"),
+            ("GET /api/v1/me", "GET /api/v1/me (Hồ sơ token · me:read)" if vi else "GET /api/v1/me (Token Profile · me:read)"),
+            ("GET /api/v1/tokens", "GET /api/v1/tokens (Danh sách token · tokens:read)" if vi else "GET /api/v1/tokens (List Tokens · tokens:read)"),
+            ("GET /api/v1/sessions", "GET /api/v1/sessions (Danh sách phiên · sessions:read)" if vi else "GET /api/v1/sessions (List Sessions · sessions:read)"),
+            ("GET /api/v1/sessions/{{sessionId}}", "GET /api/v1/sessions/{{sessionId}} (Chi tiết phiên · sessions:read)" if vi else "GET /api/v1/sessions/{{sessionId}} (Session Detail · sessions:read)"),
+            ("GET /api/v1/sessions/{{sessionId}}/events", "GET /api/v1/sessions/{{sessionId}}/events (Lọc sự kiện · events:read)" if vi else "GET /api/v1/sessions/{{sessionId}}/events (Filter Events · events:read)"),
+            ("GET /api/v1/sessions/{{sessionId}}/exports", "GET /api/v1/sessions/{{sessionId}}/exports (Danh sách tệp xuất · sessions:read)" if vi else "GET /api/v1/sessions/{{sessionId}}/exports (List Exports · sessions:read)"),
+            ("POST /api/v1/sessions/{{sessionId}}/sync", "POST /api/v1/sessions/{{sessionId}}/sync (Kích hoạt đồng bộ · sync:write)" if vi else "POST /api/v1/sessions/{{sessionId}}/sync (Trigger Sync · sync:write)"),
+            ("GET /api/v1/sessions/{{sessionId}}/sync/runs", "GET /api/v1/sessions/{{sessionId}}/sync/runs (Lịch sử đồng bộ · sessions:read)" if vi else "GET /api/v1/sessions/{{sessionId}}/sync/runs (Sync Runs · sessions:read)"),
+            ("POST /api/v1/export/one-shot", "POST /api/v1/export/one-shot (Xuất nhanh một lần · Không cần token)" if vi else "POST /api/v1/export/one-shot (One-Shot Export · No token)"),
+        ]
+        endpoint_options_html = "".join(
+            f'<option value="{val}">{html.escape(label)}</option>'
+            for val, label in endpoints_meta
+        )
+
         body = f"""
         {self._navigation(user, identity, "developers", language)}
         <main>
@@ -2161,33 +2179,23 @@ class ServerApplication:
           <section class="settings-card" style="margin-bottom:40px;">
             <p class="eyebrow">{'PLAYGROUND & THỬ NGHIỆM' if vi else 'INTERACTIVE PLAYGROUND'}</p>
             <h2>{'Trình chạy thử API trực tiếp' if vi else 'Live API Test Console'}</h2>
-            <p class="text-muted" style="margin-bottom:16px;">
+            <p style="margin-bottom:18px;color:hsl(var(--foreground));opacity:0.85;font-size:13px;line-height:1.6;">
               {'Chọn endpoint, truyền token và tham số để gửi yêu cầu và nhận kết quả phản hồi thực tế từ máy chủ.' if vi else 'Select an endpoint, supply a token and parameters to execute live requests directly against the server.'}
             </p>
 
             <div style="display:grid;gap:16px;">
               <!-- Endpoint Selector -->
-              <div class="field-group">
-                <label>
-                  Endpoint
-                  <select id="play-endpoint" onchange="onEndpointChange()" style="min-height:44px;border-radius:12px;border:1px solid hsl(var(--border));padding:0 12px;background:hsl(var(--card));font-family:monospace;font-size:13px;">
-                    <option value="GET /api/v1/health">GET /api/v1/health (Public Health - Không cần token)</option>
-                    <option value="GET /api/v1/status">GET /api/v1/status (Public Service Status - Không cần token)</option>
-                    <option value="GET /api/v1/me">GET /api/v1/me (Token Profile - Quyền me:read)</option>
-                    <option value="GET /api/v1/tokens">GET /api/v1/tokens (List Tokens - Quyền tokens:read)</option>
-                    <option value="GET /api/v1/sessions">GET /api/v1/sessions (List Sessions - Quyền sessions:read)</option>
-                    <option value="GET /api/v1/sessions/{{sessionId}}">GET /api/v1/sessions/{{sessionId}} (Session Detail)</option>
-                    <option value="GET /api/v1/sessions/{{sessionId}}/events">GET /api/v1/sessions/{{sessionId}}/events (Filter Events)</option>
-                    <option value="GET /api/v1/sessions/{{sessionId}}/exports">GET /api/v1/sessions/{{sessionId}}/exports (List Exports)</option>
-                    <option value="POST /api/v1/sessions/{{sessionId}}/sync">POST /api/v1/sessions/{{sessionId}}/sync (Trigger Sync)</option>
-                    <option value="GET /api/v1/sessions/{{sessionId}}/sync/runs">GET /api/v1/sessions/{{sessionId}}/sync/runs (Sync Runs)</option>
-                    <option value="POST /api/v1/export/one-shot">POST /api/v1/export/one-shot (One-Shot Export)</option>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;">
+                <label style="min-width:0;display:grid;gap:6px;">
+                  <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">Endpoint</span>
+                  <select id="play-endpoint" onchange="onEndpointChange()" style="width:100%;max-width:100%;box-sizing:border-box;min-height:44px;border-radius:12px;border:1px solid hsl(var(--border));padding:0 12px;background:hsl(var(--card));color:hsl(var(--foreground));font-family:monospace;font-size:13px;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;">
+                    {endpoint_options_html}
                   </select>
                 </label>
 
-                <label>
-                  {'Token Bearer sử dụng' if vi else 'Authorization Token'}
-                  <input type="text" id="play-token" placeholder="phk_..." style="font-family:monospace;font-size:13px;" oninput="updateSnippets()">
+                <label style="min-width:0;display:grid;gap:6px;">
+                  <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">{'Token Bearer xác thực' if vi else 'Authorization Token'}</span>
+                  <input type="text" id="play-token" placeholder="phk_..." style="width:100%;max-width:100%;box-sizing:border-box;min-height:44px;font-family:monospace;font-size:13px;" oninput="updateSnippets()">
                 </label>
               </div>
 
@@ -2195,27 +2203,27 @@ class ServerApplication:
               <div id="play-params" style="display:grid;gap:12px;">
                 <!-- Session Id Picker (shown for session endpoints) -->
                 <div id="group-session-id" style="display:none;">
-                  <label>
-                    Session ID
-                    <div style="display:flex;gap:8px;">
-                      <select id="play-session-select" onchange="document.getElementById('play-session-id').value = this.value; updateSnippets();" style="border-radius:12px;border:1px solid hsl(var(--border));padding:0 10px;background:hsl(var(--card));">
+                  <label style="min-width:0;display:grid;gap:6px;">
+                    <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">Session ID</span>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:10px;">
+                      <select id="play-session-select" onchange="document.getElementById('play-session-id').value = this.value; updateSnippets();" style="width:100%;max-width:100%;box-sizing:border-box;min-height:44px;border-radius:12px;border:1px solid hsl(var(--border));padding:0 10px;background:hsl(var(--card));color:hsl(var(--foreground));">
                         <option value="">-- {'Chọn phiên của bạn' if vi else 'Select your session'} --</option>
                         {session_options}
                       </select>
-                      <input type="text" id="play-session-id" placeholder="sessionId" style="font-family:monospace;font-size:13px;flex:1;" oninput="updateSnippets()">
+                      <input type="text" id="play-session-id" placeholder="sessionId" style="width:100%;max-width:100%;box-sizing:border-box;min-height:44px;font-family:monospace;font-size:13px;" oninput="updateSnippets()">
                     </div>
                   </label>
                 </div>
 
                 <!-- Query params: Date range for events -->
-                <div id="group-events-range" style="display:none;" class="field-group">
-                  <label>
-                    {'Từ ngày (start)' if vi else 'Start date'}
-                    <input type="date" id="play-start-date" value="2026-08-24" onchange="updateSnippets()">
+                <div id="group-events-range" style="display:none;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px;">
+                  <label style="min-width:0;display:grid;gap:6px;">
+                    <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">{'Từ ngày (start)' if vi else 'Start date'}</span>
+                    <input type="date" id="play-start-date" value="2026-08-24" style="width:100%;max-width:100%;box-sizing:border-box;min-height:44px;" onchange="updateSnippets()">
                   </label>
-                  <label>
-                    {'Đến ngày (end)' if vi else 'End date'}
-                    <input type="date" id="play-end-date" value="2027-01-31" onchange="updateSnippets()">
+                  <label style="min-width:0;display:grid;gap:6px;">
+                    <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">{'Đến ngày (end)' if vi else 'End date'}</span>
+                    <input type="date" id="play-end-date" value="2027-01-31" style="width:100%;max-width:100%;box-sizing:border-box;min-height:44px;" onchange="updateSnippets()">
                   </label>
                 </div>
 
