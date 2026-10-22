@@ -2175,6 +2175,50 @@ class ServerApplication:
             </div>
           </section>
 
+          <!-- Section: Quick One-Shot Export -->
+          <section class="setup-card" style="margin-bottom:24px;">
+            <p class="eyebrow">{'XUẤT NHANH MỘT LẦN' if vi else 'QUICK ONE-SHOT EXPORT'}</p>
+            <h2>{'Xuất lịch trực tiếp từ phiên đào tạo' if vi else 'Direct Calendar Export'}</h2>
+            <p style="margin-bottom:16px;color:hsl(var(--foreground));opacity:0.85;font-size:13px;line-height:1.6;">
+              {'Dùng mã nguồn HTML trang QLĐT index.aspx hoặc token phiên để xuất ngay tệp lịch (.ics, .xlsx, .json) mà không cần lưu trữ thông tin.' if vi else 'Provide saved QLĐT index.aspx HTML source or current session credentials to download calendar files (.ics, .xlsx, .json) without permanent storage.'}
+            </p>
+            <form method="post" action="/export" enctype="multipart/form-data" style="display:grid;gap:16px;max-width:650px;">
+              <input type="hidden" name="csrf" value="{csrf}">
+              <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;">
+                <label style="min-width:0;display:grid;gap:6px;">
+                  <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">{'Từ ngày' if vi else 'From date'}</span>
+                  <input required type="date" name="range_start" value="2026-08-24" style="min-height:44px;">
+                </label>
+                <label style="min-width:0;display:grid;gap:6px;">
+                  <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">{'Đến ngày' if vi else 'To date'}</span>
+                  <input required type="date" name="range_end" value="2027-01-31" style="min-height:44px;">
+                </label>
+              </div>
+              <div style="display:grid;gap:12px;">
+                <label style="min-width:0;display:grid;gap:6px;">
+                  <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">{'Tệp HTML trang index.aspx đã lưu' if vi else 'Saved index.aspx HTML file'}</span>
+                  <input type="file" name="bootstrap_file" accept=".html,text/html" style="padding:8px 12px;min-height:44px;">
+                </label>
+                <div style="text-align:center;font-size:11px;font-weight:bold;color:hsl(var(--muted-foreground));">{'— HOẶC —' if vi else '— OR —'}</div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;">
+                  <label style="min-width:0;display:grid;gap:6px;">
+                    <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">User ID</span>
+                    <input type="text" name="userId" placeholder="QLSV_..." autocomplete="off" style="min-height:44px;">
+                  </label>
+                  <label style="min-width:0;display:grid;gap:6px;">
+                    <span style="font-size:12px;font-weight:600;color:hsl(var(--foreground));">Token JWT</span>
+                    <input type="password" name="tokenJWT" placeholder="Bearer token..." autocomplete="off" style="min-height:44px;">
+                  </label>
+                </div>
+              </div>
+              <div>
+                <button type="submit" class="button button--primary" style="min-height:44px;">
+                  {'Tải xuống tệp nén ZIP' if vi else 'Download ZIP Export'}
+                </button>
+              </div>
+            </form>
+          </section>
+
           <!-- Section: Interactive API Playground -->
           <section class="settings-card" style="margin-bottom:40px;">
             <p class="eyebrow">{'PLAYGROUND & THỬ NGHIỆM' if vi else 'INTERACTIVE PLAYGROUND'}</p>
