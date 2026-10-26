@@ -1083,6 +1083,8 @@ class WebSmokeTests(unittest.TestCase):
                 self.assertIn(b"Developer Portal", body)
                 self.assertIn(b"Live API Test Console", body)
                 self.assertIn(b"/api/v1/tokens", body)
+                self.assertIn(b"value=\"GET /api/v1/sessions/{sessionId}\"", body)
+                self.assertNotIn(b"value=\"GET /api/v1/sessions/{{sessionId}}\"", body)
                 self.assertIn(b"href=\"/developers\"", body)
 
                 # Vietnamese toggle

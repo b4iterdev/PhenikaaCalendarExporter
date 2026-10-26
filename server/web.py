@@ -2071,11 +2071,11 @@ class ServerApplication:
             ("GET /api/v1/me", "GET /api/v1/me (Hồ sơ token · me:read)" if vi else "GET /api/v1/me (Token Profile · me:read)"),
             ("GET /api/v1/tokens", "GET /api/v1/tokens (Danh sách token · tokens:read)" if vi else "GET /api/v1/tokens (List Tokens · tokens:read)"),
             ("GET /api/v1/sessions", "GET /api/v1/sessions (Danh sách phiên · sessions:read)" if vi else "GET /api/v1/sessions (List Sessions · sessions:read)"),
-            ("GET /api/v1/sessions/{{sessionId}}", "GET /api/v1/sessions/{{sessionId}} (Chi tiết phiên · sessions:read)" if vi else "GET /api/v1/sessions/{{sessionId}} (Session Detail · sessions:read)"),
-            ("GET /api/v1/sessions/{{sessionId}}/events", "GET /api/v1/sessions/{{sessionId}}/events (Lọc sự kiện · events:read)" if vi else "GET /api/v1/sessions/{{sessionId}}/events (Filter Events · events:read)"),
-            ("GET /api/v1/sessions/{{sessionId}}/exports", "GET /api/v1/sessions/{{sessionId}}/exports (Danh sách tệp xuất · sessions:read)" if vi else "GET /api/v1/sessions/{{sessionId}}/exports (List Exports · sessions:read)"),
-            ("POST /api/v1/sessions/{{sessionId}}/sync", "POST /api/v1/sessions/{{sessionId}}/sync (Kích hoạt đồng bộ · sync:write)" if vi else "POST /api/v1/sessions/{{sessionId}}/sync (Trigger Sync · sync:write)"),
-            ("GET /api/v1/sessions/{{sessionId}}/sync/runs", "GET /api/v1/sessions/{{sessionId}}/sync/runs (Lịch sử đồng bộ · sessions:read)" if vi else "GET /api/v1/sessions/{{sessionId}}/sync/runs (Sync Runs · sessions:read)"),
+            ("GET /api/v1/sessions/{sessionId}", "GET /api/v1/sessions/{sessionId} (Chi tiết phiên · sessions:read)" if vi else "GET /api/v1/sessions/{sessionId} (Session Detail · sessions:read)"),
+            ("GET /api/v1/sessions/{sessionId}/events", "GET /api/v1/sessions/{sessionId}/events (Lọc sự kiện · events:read)" if vi else "GET /api/v1/sessions/{sessionId}/events (Filter Events · events:read)"),
+            ("GET /api/v1/sessions/{sessionId}/exports", "GET /api/v1/sessions/{sessionId}/exports (Danh sách tệp xuất · sessions:read)" if vi else "GET /api/v1/sessions/{sessionId}/exports (List Exports · sessions:read)"),
+            ("POST /api/v1/sessions/{sessionId}/sync", "POST /api/v1/sessions/{sessionId}/sync (Kích hoạt đồng bộ · sync:write)" if vi else "POST /api/v1/sessions/{sessionId}/sync (Trigger Sync · sync:write)"),
+            ("GET /api/v1/sessions/{sessionId}/sync/runs", "GET /api/v1/sessions/{sessionId}/sync/runs (Lịch sử đồng bộ · sessions:read)" if vi else "GET /api/v1/sessions/{sessionId}/sync/runs (Sync Runs · sessions:read)"),
             ("POST /api/v1/export/one-shot", "POST /api/v1/export/one-shot (Xuất nhanh một lần · Không cần token)" if vi else "POST /api/v1/export/one-shot (One-Shot Export · No token)"),
         ]
         endpoint_options_html = "".join(
@@ -2438,7 +2438,7 @@ class ServerApplication:
         function onEndpointChange() {{
           const ep = document.getElementById('play-endpoint').value;
           const [method, route] = ep.split(' ');
-          const hasSession = route.includes('{{sessionId}}');
+          const hasSession = route.includes('{{sessionId}}') || route.includes('{{{{sessionId}}}}');
           const isEvents = route.includes('/events');
           const isOneShot = route.includes('one-shot');
 
@@ -2460,8 +2460,9 @@ class ServerApplication:
         function getBuiltUrlAndOptions() {{
           const ep = document.getElementById('play-endpoint').value;
           const [method, routeTemplate] = ep.split(' ');
-          const sid = document.getElementById('play-session-id').value.trim() || 'SESSION_ID';
-          let path = routeTemplate.replace('{{sessionId}}', sid);
+          const rawSid = document.getElementById('play-session-id').value.trim();
+          const sid = (rawSid || 'SESSION_ID').replace(/^\\{{+|\\}}+$/g, '');
+          let path = routeTemplate.replace('{{{{sessionId}}}}', sid).replace('{{sessionId}}', sid);
 
           if (path.includes('/events')) {{
             const st = document.getElementById('play-start-date').value;
