@@ -9,7 +9,7 @@
     --card: 0 0% 100%;
     --card-foreground: 222 47% 11%;
     --muted: 214 32% 91%;
-    --muted-foreground: 215 16% 47%;
+    --muted-foreground: 215 25% 35%;
     --border: 214 32% 85%;
     --primary: 222 65% 22%;
     --primary-foreground: 210 40% 98%;
@@ -569,4 +569,13 @@
       @apply w-full;
     }
   }
+}
+
+.text-muted, small.text-muted, p.text-muted, span.text-muted {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+input::placeholder, textarea::placeholder {
+  color: hsl(var(--muted-foreground) / 0.75);
+  opacity: 1;
 }

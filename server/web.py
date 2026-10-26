@@ -2041,23 +2041,23 @@ class ServerApplication:
                 if is_revoked else
                 f'<span class="status status--operational">{"Hoạt động" if vi else "Active"}</span>'
             )
-            scopes_badge = " ".join(f'<code style="font-size:11px;padding:2px 6px;border-radius:6px;background:hsl(var(--muted)/0.5);">{html.escape(s)}</code>' for s in t.get("scopes", []))
+            scopes_badge = " ".join(f'<code style="font-size:11px;padding:2px 6px;border-radius:6px;background:hsl(var(--muted));color:hsl(var(--foreground));border:1px solid hsl(var(--border));font-weight:500;">{html.escape(s)}</code>' for s in t.get("scopes", []))
             revoke_btn = "" if is_revoked else f'<button type="button" class="button button--danger" style="min-height:36px;padding:4px 12px;" onclick="revokeToken(\'{tid}\')">{"Thu hồi" if vi else "Revoke"}</button>'
             token_rows.append(f"""
             <div class="managed-session" id="token-row-{tid}">
               <div style="flex:1;min-width:240px;">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                  <strong>{tname}</strong>
+                  <strong style="color:hsl(var(--foreground));">{tname}</strong>
                   {status_badge}
                 </div>
                 <p style="margin:2px 0;font-family:monospace;font-size:12px;color:hsl(var(--muted-foreground));">Prefix: <b>{tprefix}...</b> · ID: {tid}</p>
                 <div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;">{scopes_badge}</div>
-                <p style="margin:6px 0 0 0;font-size:11px;color:hsl(var(--muted-foreground));">{"Tạo lúc" if vi else "Created"}: {tcreated} · {"Dùng lần cuối" if vi else "Last used"}: {tused}</p>
+                <p style="margin:6px 0 0 0;font-size:12px;color:hsl(var(--muted-foreground));">{"Tạo lúc" if vi else "Created"}: {tcreated} · {"Dùng lần cuối" if vi else "Last used"}: {tused}</p>
               </div>
               <div>{revoke_btn}</div>
             </div>""")
 
-        token_list_html = "".join(token_rows) or f'<p class="text-muted" id="no-tokens-msg">{"Chưa có API token nào. Hãy tạo token đầu tiên bên dưới." if vi else "No API tokens yet. Create your first token below."}</p>'
+        token_list_html = "".join(token_rows) or f'<p class="text-muted" id="no-tokens-msg" style="color:hsl(var(--muted-foreground));font-size:14px;margin-top:8px;">{"Chưa có API token nào. Hãy tạo token đầu tiên bên dưới." if vi else "No API tokens yet. Create your first token below."}</p>'
 
         # Session selector options for playground
         session_options = "".join(
