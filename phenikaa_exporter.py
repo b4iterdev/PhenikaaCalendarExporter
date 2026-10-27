@@ -10,6 +10,8 @@ import hashlib
 import json
 import re
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,6 +20,20 @@ from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
+
+_OUTBOUND_LOCK = threading.Lock()
+_LAST_REQUEST_TIME = 0.0
+MIN_OUTBOUND_INTERVAL = 1.0  # seconds between requests to Phenikaa firewall
+
+
+def _wait_for_outbound_slot() -> None:
+    global _LAST_REQUEST_TIME
+    with _OUTBOUND_LOCK:
+        now = time.monotonic()
+        elapsed = now - _LAST_REQUEST_TIME
+        if elapsed < MIN_OUTBOUND_INTERVAL:
+            time.sleep(MIN_OUTBOUND_INTERVAL - elapsed)
+        _LAST_REQUEST_TIME = time.monotonic()
 
 BOOTSTRAP_KEY = "AzzS"
 RESPONSE_KEY = "AzzSystem"
@@ -129,19 +145,27 @@ def fetch_calendar(
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive",
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/131.0.0.0 Safari/537.36"
         ),
         "Origin": PORTAL_BASE_URL,
         "Referer": PORTAL_BASE_URL + "/congsinhvien/index.aspx",
+        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
     }
     if session.get("cookies"):
         headers["Cookie"] = str(session["cookies"])
     elif session.get("authCookie"):
         headers["Cookie"] = f".Auth={session['authCookie']}"
 
+    _wait_for_outbound_slot()
     request = urllib.request.Request(
         base_url.rstrip("/") + CALENDAR_API_PATH,
         data=urllib.parse.urlencode({"A": encrypted}).encode("ascii"),

@@ -215,6 +215,11 @@ class LoginBroker:
             profile_dir = self.profile_dir(session_id)
             profile_dir.mkdir(parents=True, exist_ok=True)
             args = ["--no-sandbox"] if self._config.browser_no_sandbox else []
+            args.extend([
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            ])
             launched = self._launch_context(str(profile_dir), True, {"width": 1280, "height": 860}, args)
             if isinstance(launched, tuple):
                 context, playwright_owner = launched
@@ -223,6 +228,10 @@ class LoginBroker:
             cdp = None
             try:
                 page = context.pages[0] if context.pages else context.new_page()
+                try:
+                    page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                except Exception:
+                    pass
                 cdp = context.new_cdp_session(page)
                 self._wire_capture(page, state)
 
