@@ -95,6 +95,13 @@ pub async fn create_session_handler(
     State(state): State<AppState>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    if payload.id.is_empty()
+        || payload.id.contains('/')
+        || payload.id.contains('\\')
+        || payload.id.contains("..")
+    {
+        return err_resp(StatusCode::BAD_REQUEST, "invalid_id", "invalid session id").into_response();
+    }
     match state
         .database
         .create_session(

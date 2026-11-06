@@ -143,13 +143,13 @@ pub fn write_xlsx<P: AsRef<Path>>(path: P, events: &[CalendarEvent]) -> Result<(
             if is_exam { "Exam" } else { "Class" },
             rf,
         )?;
-        calendar.write_string_with_format(row_idx, 5, &ev.course_name(), rf)?;
-        calendar.write_string_with_format(row_idx, 6, &ev.section_name(), rf)?;
-        calendar.write_string_with_format(row_idx, 7, &ev.room(), rf)?;
-        calendar.write_string_with_format(row_idx, 8, &ev.lecturer(), rf)?;
-        calendar.write_string_with_format(row_idx, 9, &ev.periods_string(), rf)?;
-        calendar.write_string_with_format(row_idx, 10, &ev.session_desc(), rf)?;
-        calendar.write_string_with_format(row_idx, 11, &ev.attendance(), rf)?;
+        calendar.write_string_with_format(row_idx, 5, ev.course_name(), rf)?;
+        calendar.write_string_with_format(row_idx, 6, ev.section_name(), rf)?;
+        calendar.write_string_with_format(row_idx, 7, ev.room(), rf)?;
+        calendar.write_string_with_format(row_idx, 8, ev.lecturer(), rf)?;
+        calendar.write_string_with_format(row_idx, 9, ev.periods_string(), rf)?;
+        calendar.write_string_with_format(row_idx, 10, ev.session_desc(), rf)?;
+        calendar.write_string_with_format(row_idx, 11, ev.attendance(), rf)?;
         calendar.write_string_with_format(row_idx, 12, ev.id.as_deref().unwrap_or(""), rf)?;
 
         row_idx += 1;
@@ -177,7 +177,7 @@ pub fn write_xlsx<P: AsRef<Path>>(path: P, events: &[CalendarEvent]) -> Result<(
     }
 
     let table = Table::new().set_style(TableStyle::Medium2);
-    calendar.add_table(0, 0, (row_idx - 1) as u32, 12, &table)?;
+    calendar.add_table(0, 0, row_idx - 1, 12, &table)?;
 
     // 2. Summary worksheet
     let summary = workbook.add_worksheet();

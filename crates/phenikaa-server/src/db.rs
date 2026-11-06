@@ -280,6 +280,17 @@ pub struct Database {
     pool: Pool<Sqlite>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct NewSyncRun<'a> {
+    pub session_id: &'a str,
+    pub started_at: &'a str,
+    pub finished_at: Option<&'a str>,
+    pub ok: bool,
+    pub refreshed_token: bool,
+    pub events: Option<i64>,
+    pub detail: Option<&'a str>,
+}
+
 impl Database {
     pub async fn connect<P: AsRef<Path>>(path: P) -> Result<Self, DbError> {
         let p = path.as_ref();
@@ -435,26 +446,20 @@ impl Database {
 
     pub async fn record_sync_run(
         &self,
-        session_id: &str,
-        started_at: &str,
-        finished_at: Option<&str>,
-        ok: bool,
-        refreshed_token: bool,
-        events: Option<i64>,
-        detail: Option<&str>,
+        run: &NewSyncRun<'_>,
     ) -> Result<i64, DbError> {
         let res = sqlx::query(
             r#"INSERT INTO sync_runs (
                 session_id, started_at, finished_at, ok, refreshed_token, events, detail
             ) VALUES (?, ?, ?, ?, ?, ?, ?)"#,
         )
-        .bind(session_id)
-        .bind(started_at)
-        .bind(finished_at)
-        .bind(if ok { 1 } else { 0 })
-        .bind(if refreshed_token { 1 } else { 0 })
-        .bind(events)
-        .bind(detail)
+        .bind(run.session_id)
+        .bind(run.started_at)
+        .bind(run.finished_at)
+        .bind(if run.ok { 1 } else { 0 })
+        .bind(if run.refreshed_token { 1 } else { 0 })
+        .bind(run.events)
+        .bind(run.detail)
         .execute(&self.pool)
         .await?;
         Ok(res.last_insert_rowid())
@@ -647,9 +652,17 @@ mod tests {
         assert_eq!(updated.status, STATUS_ACTIVE);
         assert_eq!(updated.phenikaa_user_id.as_deref(), Some("std-1"));
 
-        db.record_sync_run("sess-1", "2026-08-01T00:00:00Z", None, true, false, Some(15), None)
-            .await
-            .unwrap();
+        db.record_sync_run(&NewSyncRun {
+            session_id: "sess-1",
+            started_at: "2026-08-01T00:00:00Z",
+            finished_at: None,
+            ok: true,
+            refreshed_token: false,
+            events: Some(15),
+            detail: None,
+        })
+        .await
+        .unwrap();
         let runs = db.get_sync_runs("sess-1", 10).await.unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].events, Some(15));

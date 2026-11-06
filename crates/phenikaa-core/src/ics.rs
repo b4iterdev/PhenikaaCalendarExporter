@@ -74,7 +74,7 @@ pub fn generate_ics(events: &[CalendarEvent], calendar_name: &str) -> String {
         let is_exam = ev.is_exam();
         let course = ev.course_name();
         let summary = if is_exam {
-            format!("Exam: {}", course)
+            format!("Exam: {course}")
         } else {
             course.clone()
         };

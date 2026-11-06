@@ -53,6 +53,15 @@ pub async fn download_export(
     Path((session_id, filename)): Path<(String, String)>,
     config: ServerConfig,
 ) -> impl IntoResponse {
+    // Validate session_id to avoid path traversal
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid session id").into_response();
+    }
+
     let allowed = ["calendar.ics", "calendar.json", "calendar.xlsx"];
     if !allowed.contains(&filename.as_str()) {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
@@ -109,5 +118,23 @@ pub fn create_app(
         )
         .nest("/api/v1", api_router(app_state))
         .nest_service("/static", ServeDir::new(static_dir))
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::overriding(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';"),
+            ),
+        )
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::overriding(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+        )
+        .layer(
+            tower_http::set_header::SetResponseHeaderLayer::overriding(
+                header::X_FRAME_OPTIONS,
+                HeaderValue::from_static("DENY"),
+            ),
+        )
         .layer(CorsLayer::permissive())
 }

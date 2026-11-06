@@ -134,7 +134,15 @@ impl SyncEngine {
         let started_at = Utc::now().to_rfc3339();
         let _run_id = match self
             .database
-            .record_sync_run(&session.id, &started_at, None, false, false, None, None)
+            .record_sync_run(&crate::db::NewSyncRun {
+                session_id: &session.id,
+                started_at: &started_at,
+                finished_at: None,
+                ok: false,
+                refreshed_token: false,
+                events: None,
+                detail: None,
+            })
             .await
         {
             Ok(id) => id,
@@ -153,15 +161,15 @@ impl SyncEngine {
                 let finished_at = Utc::now().to_rfc3339();
                 let _ = self
                     .database
-                    .record_sync_run(
-                        &session.id,
-                        &started_at,
-                        Some(&finished_at),
-                        true,
-                        refreshed,
-                        Some(events.len() as i64),
-                        Some(&detail),
-                    )
+                    .record_sync_run(&crate::db::NewSyncRun {
+                        session_id: &session.id,
+                        started_at: &started_at,
+                        finished_at: Some(&finished_at),
+                        ok: true,
+                        refreshed_token: refreshed,
+                        events: Some(events.len() as i64),
+                        detail: Some(&detail),
+                    })
                     .await;
                 SyncResult {
                     ok: true,
@@ -175,15 +183,15 @@ impl SyncEngine {
                 let detail = e.to_string();
                 let _ = self
                     .database
-                    .record_sync_run(
-                        &session.id,
-                        &started_at,
-                        Some(&finished_at),
-                        false,
-                        false,
-                        None,
-                        Some(&detail),
-                    )
+                    .record_sync_run(&crate::db::NewSyncRun {
+                        session_id: &session.id,
+                        started_at: &started_at,
+                        finished_at: Some(&finished_at),
+                        ok: false,
+                        refreshed_token: false,
+                        events: None,
+                        detail: Some(&detail),
+                    })
                     .await;
                 SyncResult {
                     ok: false,

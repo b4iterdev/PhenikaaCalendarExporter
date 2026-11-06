@@ -8,7 +8,7 @@ description = "Web server and calendar synchronization service for Phenikaa"
 phenikaa-core = { path = "../phenikaa-core" }
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "set-header"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 fernet = "0.2"
