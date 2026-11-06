@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-29T06:50:00Z",
+  "title": "Design System: Phenikaa Calendar Exporter",
+  "extensions": {
+    "colorMeta": {
+      "primary": { "role": "primary", "displayName": "Royal Blue", "canonical": "#2563eb", "tonalRamp": ["#1e3a8a", "#1e40af", "#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#93c5fd", "#dbeafe"] },
+      "foreground": { "role": "neutral", "displayName": "Slate Ink", "canonical": "#21262d", "tonalRamp": ["#0f172a", "#1e293b", "#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1", "#f1f5f9"] },
+      "panel": { "role": "neutral", "displayName": "Slate Panel", "canonical": "#f8fafc", "tonalRamp": ["#334155", "#475569", "#64748b", "#94a3b8", "#cbd5e1", "#e2e8f0", "#f1f5f9", "#f8fafc"] }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Hero headline only." },
+      "headline": { "displayName": "Headline", "purpose": "Section titles." },
+      "body": { "displayName": "Body", "purpose": "Reading text and explanations." },
+      "label": { "displayName": "Label", "purpose": "Field labels and small actions." }
+    },
+    "shadows": [
+      { "name": "action-sm", "value": "0 1px 2px 0 rgba(0, 0, 0, 0.05)", "purpose": "Subtle tactile depth on buttons at rest." },
+      { "name": "modal", "value": "0 20px 25px -5px rgba(0, 0, 0, 0.1)", "purpose": "Floating dialog elevation." }
+    ],
+    "motion": [
+      { "name": "ease-standard", "value": "cubic-bezier(0.4, 0, 0.2, 1)", "purpose": "Transitions for colors, borders, and hovers." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action target on a surface.",
+      "html": "<button class=\"ds-btn-primary\">Xuất tệp lịch</button>",
+      "css": ".ds-btn-primary { background: #2563eb; color: #ffffff; padding: 10px 16px; font-weight: 600; font-size: 14px; border-radius: 8px; border: 1px solid #2563eb; cursor: pointer; transition: background 0.15s ease, box-shadow 0.15s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.05); } .ds-btn-primary:hover { background: #1d4ed8; border-color: #1d4ed8; }"
+    },
+    {
+      "name": "Quiet Button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "Secondary or auxiliary action.",
+      "html": "<button class=\"ds-btn-quiet\">Xem hướng dẫn</button>",
+      "css": ".ds-btn-quiet { background: #ffffff; color: #21262d; padding: 10px 16px; font-weight: 600; font-size: 14px; border-radius: 8px; border: 1px solid #e2e8f0; cursor: pointer; transition: background 0.15s ease; } .ds-btn-quiet:hover { background: #f1f5f9; }"
+    },
+    {
+      "name": "Working Panel",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Container for the right-hand hero quick export workflow.",
+      "html": "<div class=\"ds-panel\"><h3>QUICK EXPORT</h3><p>Upload a file or enter session tokens to begin.</p></div>",
+      "css": ".ds-panel { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 16px; padding: 24px; color: #21262d; } .ds-panel h3 { margin: 0 0 8px 0; font-size: 16px; font-weight: 700; } .ds-panel p { margin: 0; font-size: 14px; color: #64748b; line-height: 1.5; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Friendly Utility",
+    "overview": "A category-standard academic timetable tool executed with precision and restraint, inspired by Google Calendar and Notion Calendar. Crisp white surfaces, one committed blue accent doing all primary interactive work, and clean typographic hierarchy.\n\nNo decorative costume, no faux textures, no zero-blur offset drop shadows, and no decorative eyebrow kickers above headings. Every surface delivers the 2-minute unaided export workflow without friction.",
+    "keyCharacteristics": [
+      "White and slate-50 panel surfaces with subtle 1px border definition",
+      "Single committed Royal Blue accent (#2563eb) driving all calls to action",
+      "Split hero with real working inputs in the first viewport",
+      "Clean system-ui typography with tight-tracked bold display headings"
+    ],
+    "rules": [
+      { "name": "The One Voice Rule", "body": "The royal blue accent is used strictly for interactive affordances and active state. It never appears as a decorative background, border accent, or graphic filler.", "section": "colors" },
+      { "name": "The No-Eyebrow Rule", "body": "Section headings carry their own weight. Never place an uppercase tracking-spaced kicker or eyebrow label above a heading.", "section": "typography" },
+      { "name": "The Flat Surface Rule", "body": "Cards and panels never use wide fuzzy ambient shadows or neobrutalist block shadows at rest. Depth comes from tonal contrast between pure white (#ffffff) and panel tint (#f8fafc) over a 1px border.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do place the primary export workflow in the first viewport above the fold.",
+      "Do keep button radii at 8px and panel radii at 16px.",
+      "Do maintain a strict 4.5:1 minimum contrast ratio for all secondary and helper text.",
+      "Do keep error states clear, prominent, and accompanied by recovery instructions."
+    ],
+    "donts": [
+      "Don't add decorative eyebrow labels or numbers above section titles.",
+      "Don't use decorative gradients, glassmorphism blur layers, or hard offset drop shadows.",
+      "Don't hide or relocate the primary quick-export form behind an unnecessary sign-in wall.",
+      "Don't introduce external font dependencies that cause layout shift or delay rendering."
+    ]
+  }
+}

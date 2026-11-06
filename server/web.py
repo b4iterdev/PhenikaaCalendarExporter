@@ -1496,7 +1496,7 @@ class ServerApplication:
             last_sync = html.escape(self._friendly_timestamp(session.get("last_sync_at"), language))
             summary.append(f"<div class=\"summary-item\"><span>{label}</span><strong>{status_label}</strong><small>{last_sync}</small></div>")
             rows.append(f"""
-            <article class="session-card"><div class="session-card__head"><div><p class="eyebrow">Phenikaa account</p><h2>{label}</h2></div><span class="status status--{status}">{status_label}</span></div>
+            <article class="session-card"><div class="session-card__head"><div><h2>{label}</h2></div><span class="status status--{status}">{status_label}</span></div>
             <p class="session-card__error">{error}</p><div class="session-section session-section--connection"><h3>{'Kết nối' if vi else 'Connection'}</h3><div class="action-row"><a class="button button--primary" href="/sessions/{sid}/login">{'Kết nối lại tài khoản' if is_active and vi else 'Reconnect account' if is_active else 'Đăng nhập để kết nối' if vi else 'Sign in to connect'}</a>{sync_action}</div></div>
             <div class="session-section"><h3>{'Khoảng thời gian lịch' if vi else 'Calendar range'}</h3><form class="range-form" method="post" action="/sessions/{sid}/settings"><input type="hidden" name="csrf" value="{csrf}">
             <div class="field-group"><label>{text['from']} <input type="date" name="range_start" value="{html.escape(str(session.get('range_start') or ''))}"></label><label>{text['to']} <input type="date" name="range_end" value="{html.escape(str(session.get('range_end') or ''))}"></label></div>
@@ -1504,13 +1504,13 @@ class ServerApplication:
             {downloads}{f'<div class="session-section"><h3>Google Calendar</h3><div class="integration">{google}</div></div>' if self.google_login is None else ''}</article>""")
         start, end = academic_year_range()
         new_session_form = "" if rows else f"""
-         <section class="setup-card"><p class="eyebrow">{'KẾT NỐI ĐẦU TIÊN' if vi else 'FIRST CONNECTION'}</p><h2>{'Phiên mới: kết nối tài khoản Phenikaa' if vi else 'New session: connect a Phenikaa account'}</h2><p>{'Chọn khoảng thời gian học tập, sau đó đăng nhập một lần. Máy chủ mã hóa và tự động theo dõi phiên của bạn.' if vi else 'Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.'}</p><form method="post" action="/sessions">
+         <section class="setup-card"><h2>{'Phiên mới: kết nối tài khoản Phenikaa' if vi else 'New session: connect a Phenikaa account'}</h2><p>{'Chọn khoảng thời gian học tập, sau đó đăng nhập một lần. Máy chủ mã hóa và tự động theo dõi phiên của bạn.' if vi else 'Choose an academic window, then sign in once. The server keeps the session encrypted and watches it for refreshes.'}</p><form method="post" action="/sessions">
         <input type="hidden" name="csrf" value="{csrf}"><label>Name <input name="label" value="Phenikaa account"></label>
          <label>{text['from']} <input type="date" name="range_start" value="{start.isoformat()}"></label>
          <label>{text['to']} <input type="date" name="range_end" value="{end.isoformat()}"></label><button class="button button--primary">{'Tạo và đăng nhập' if vi else 'Create and sign in'}</button></form></section>
         """
         summary_markup = f"<section class=\"summary-grid\">{''.join(summary)}</section>" if summary else ""
-        export_form = f"""<section class=\"export-panel\"><div class=\"section-heading\"><div><p class=\"eyebrow\">{text['export_eyebrow']}</p><h2>{text['export_title']}</h2></div><p class=\"page-description\">{text['export_description']}</p></div>
+        export_form = f"""<section class=\"export-panel\"><div class=\"section-heading\"><div><h2>{text['export_title']}</h2></div><p class=\"page-description\">{text['export_description']}</p></div>
          <form class=\"export-form\" method=\"post\" action=\"/export\" enctype=\"multipart/form-data\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
         <div class=\"date-row\"><label>From <input required type=\"date\" name=\"range_start\" value=\"{start.isoformat()}\"></label>
         <label>To <input required type=\"date\" name=\"range_end\" value=\"{end.isoformat()}\"></label></div>
@@ -1521,14 +1521,14 @@ class ServerApplication:
         google_account = self._google_account_markup(int(user["id"]), csrf, language)
         body = f"""
         {self._navigation(user, identity, "dashboard", language)}
-         <main><div class="section-heading"><div><p class="eyebrow">{'PHIÊN LỊCH' if vi else 'Calendar sessions'}</p><h2>{text['sessions']}</h2><p class="page-description">{text['description']} · <a href="/status" style="text-decoration:underline;">{'Xem trạng thái máy chủ' if vi else 'View server status'}</a></p></div></div>{export_form}{google_account}{summary_markup}{new_session_form}
-         {''.join(rows) or f'<section class="empty-state"><p class="eyebrow">{"CHƯA CÓ NGUỒN HOẠT ĐỘNG" if vi else "NO ACTIVE SOURCE"}</p><h2>{"Không gian làm việc đã sẵn sàng." if vi else "Your workspace is ready."}</h2><p>{"Kết nối tài khoản Phenikaa ở trên để bắt đầu theo dõi và xuất lịch học của bạn." if vi else "Connect your Phenikaa account above to begin observing and exporting your academic calendar."}</p></section>'}</main>"""
+         <main><div class="section-heading"><div><h2>{text['sessions']}</h2><p class="page-description">{text['description']} · <a href="/status" style="text-decoration:underline;">{'Xem trạng thái máy chủ' if vi else 'View server status'}</a></p></div></div>{export_form}{google_account}{summary_markup}{new_session_form}
+         {''.join(rows) or f'<section class="empty-state"><h2>{"Không gian làm việc đã sẵn sàng." if vi else "Your workspace is ready."}</h2><p>{"Kết nối tài khoản Phenikaa ở trên để bắt đầu theo dõi và xuất lịch học của bạn." if vi else "Connect your Phenikaa account above to begin observing and exporting your academic calendar."}</p></section>'}</main>"""
         self._html(handler, 200, self._layout("Calendar sessions", body), no_store=True)
 
     def _landing(self, handler: BaseHTTPRequestHandler) -> None:
         body = """
         <header class="site-header"><a class="brand" href="/"><span class="brand-mark">P</span><span>PHENIKAA <b>CALENDAR</b></span></a><a class="button button--primary" href="/auth/login">Login</a></header>
-        <main><section class="landing-hero"><div><p class="eyebrow">Your semester, made portable</p><h1>Carry your timetable beyond the portal.</h1>
+        <main><section class="landing-hero"><div><h1>Carry your timetable beyond the portal.</h1>
         <p class="hero-lede">Turn Phenikaa classes and exams into calendar files you control. Export once for Apple Calendar, Google Calendar, Outlook, or a spreadsheet. Syncing is entirely optional.</p>
         <p><a class="button button--primary" href="/auth/login">Login to export</a></p></div>
         <div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section>
@@ -1545,35 +1545,35 @@ class ServerApplication:
         notice = ""
         if warning:
             label = "Cảnh báo dọn dẹp lịch" if vi else "Calendar cleanup warning"
-            notice = f"""<section class="setup-card"><p class="eyebrow">{label}</p><p>{html.escape(warning)}</p></section>"""
+            notice = f"""<section class="setup-card"><h2>{label}</h2><p>{html.escape(warning)}</p></section>"""
         start, end = academic_year_range()
         csrf = self.signed_sessions.create({"purpose": "public_export"}, lifetime=30 * 60)
         empty_file_label = json.dumps("Chưa chọn file" if vi else "No file selected")
         text = {
-             "eyebrow": "TẠO LỊCH NHANH" if vi else "QUICK EXPORT",
-            "title": "Tạo file lịch học dạng .ics" if vi else "Export schedule as .ics",
-            "description": "Dùng file HTML đã lưu hoặc token hiện tại để tải lịch học." if vi else "Use a saved authenticated HTML page or your current token to download your calendar. Credentials are processed for this export only and are not stored.",
-             "saved": "File HTML" if vi else "HTML file",
-             "file_prompt": "Kéo thả file HTML hoặc bấm để chọn" if vi else "Drop an HTML file here or click to choose",
-            "html": "" if vi else "",
-             "file_hint": "Mở trang lịch học trên QLDT, nhấn Ctrl + S để lưu trang, sau đó chọn file HTML vừa lưu." if vi else "Open your timetable on QLDT, press Ctrl + S to save the page, then choose the HTML file you saved.",
-             "manual": "Nhập thông tin thủ công" if vi else "Enter details manually",
-             "user_id": "ID người dùng" if vi else "User ID",
+            "title": 'Lịch học Phenikaa,<br><em>trong mọi ứng dụng lịch</em>' if vi else 'Your Phenikaa timetable,<br><em>in every calendar app</em>',
+            "description": "Xuất lịch học và lịch thi thành .ics, .xlsx và .json. Đồng bộ Google Calendar là tùy chọn. Không bao giờ lưu mật khẩu của bạn." if vi else "Export classes and exams as .ics, .xlsx and .json. Google Calendar sync is optional. Your password is never stored.",
+            "panel_title": "TẠO LỊCH NHANH" if vi else "QUICK EXPORT",
+            "saved": "File HTML" if vi else "HTML file",
+            "file_prompt": "Kéo thả file HTML hoặc bấm để chọn" if vi else "Drop an HTML file here or click to choose",
+            "file_hint": "Mở trang lịch học trên QLDT, nhấn Ctrl + S để lưu trang, sau đó chọn file HTML vừa lưu." if vi else "Open your timetable on QLDT, press Ctrl + S to save the page, then choose the HTML file you saved.",
+            "manual": "Nhập thông tin thủ công" if vi else "Enter details manually",
+            "user_id": "ID người dùng" if vi else "User ID",
             "manual_hint": "Cung cấp cả hai trường và để trống file HTML." if vi else "Provide both fields and leave the HTML file empty.",
             "from": "Từ" if vi else "From", "to": "Đến" if vi else "To",
-             "or": "HOẶC" if vi else "OR", "submit": "Xuất tệp lịch" if vi else "Export calendar files",
+            "or": "HOẶC" if vi else "OR", "submit": "Xuất tệp lịch" if vi else "Export calendar files",
         }
         body = f"""{self._navigation(user, identity, "export", language)}
-          <main>{notice}<section class="export-shell"><div class="export-copy"><p class="eyebrow">{text['eyebrow']}</p><h1>{text['title']}</h1><p class="hero-lede">{text['description']}</p>
+          <main>{notice}<section class="export-shell"><div class="export-copy"><h1>{text['title']}</h1><p class="hero-lede">{text['description']}</p><div class="action-row" style="margin-top:1.5rem;"><a class="button button--quiet" href="/about">{'Xem cách dùng' if vi else 'How it works'}</a></div></div>
+          <div class="export-panel"><h2>{text['panel_title']}</h2>
           <form class="export-form" method="post" action="/export" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{csrf}"><div class="date-row"><label>{text['from']} <input required type="date" name="range_start" value="{start.isoformat()}"></label><label>{text['to']} <input required type="date" name="range_end" value="{end.isoformat()}"></label></div>
-          <div class="credential-grid"><fieldset><legend>{text['saved']}</legend><label class="file-dropzone" for="bootstrap-file"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="file-dropzone__copy"><strong>{text['file_prompt']}</strong><small class="file-name" aria-live="polite">{'Chưa chọn file' if vi else 'No file selected'}</small></span><input id="bootstrap-file" type="file" name="bootstrap_file" accept=".html,text/html"></label><p class="hint">{text['file_hint']}</p></fieldset><div class="or" aria-hidden="true"><span>{text['or']}</span></div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name="userId" autocomplete="off"></label><label>{'Mã Token' if vi else 'Access token'}<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">{text['manual_hint']}</p></fieldset></div><button class="button button--primary" type="submit">{text['submit']}</button></form></div><div class="calendar-mark" aria-hidden="true"><span>AUG</span><strong>24</strong><small>06:45 · Machine learning</small></div></section></main>
+          <div class="credential-grid"><fieldset><legend>{text['saved']}</legend><label class="file-dropzone" for="bootstrap-file"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="file-dropzone__copy"><strong>{text['file_prompt']}</strong><small class="file-name" aria-live="polite">{'Chưa chọn file' if vi else 'No file selected'}</small></span><input id="bootstrap-file" type="file" name="bootstrap_file" accept=".html,text/html"></label><p class="hint">{text['file_hint']}</p></fieldset><div class="or" aria-hidden="true"><span>{text['or']}</span></div><fieldset><legend>{text['manual']}</legend><label>{text['user_id']}<input name="userId" autocomplete="off"></label><label>{'Mã Token' if vi else 'Access token'}<input type="password" name="tokenJWT" autocomplete="off"></label><p class="hint">{text['manual_hint']}</p></fieldset></div><button class="button button--primary" type="submit">{text['submit']}</button></form></div></section></main>
           <script>const dropzone=document.querySelector('.file-dropzone');const fileInput=document.querySelector('#bootstrap-file');const fileName=document.querySelector('.file-name');if(dropzone&&fileInput&&fileName){{const showFile=()=>{{fileName.textContent=fileInput.files[0]?.name||{empty_file_label};}};['dragenter','dragover'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.add('file-dropzone--active');}}));['dragleave','drop'].forEach(event=>dropzone.addEventListener(event, e=>{{e.preventDefault();dropzone.classList.remove('file-dropzone--active');}}));dropzone.addEventListener('drop',e=>{{if(e.dataTransfer.files.length){{fileInput.files=e.dataTransfer.files;showFile();}}}});fileInput.addEventListener('change',showFile);}}</script>"""
         self._html(handler, 200, self._layout("Quick export", body), no_store=True)
 
     def _about(self, handler: BaseHTTPRequestHandler, user: dict[str, Any] | None, identity: dict[str, Any] | None) -> None:
         language = self._language(handler)
         vi = language == "vi"
-        body = f"""{self._navigation(user, identity, "about", language)}<main><section class="landing-hero"><div><p class="eyebrow">ABOUT</p><h1>{'Lịch học của bạn, dễ mang theo.' if vi else 'Your timetable, made portable.'}</h1><p class="hero-lede">{'Phenikaa Calendar Exporter chuyển lịch học và lịch thi thành các file ICS, XLSX và JSON để bạn dùng ở nơi mình muốn.' if vi else 'Phenikaa Calendar Exporter turns your classes and exams into ICS, XLSX, and JSON files you can use wherever you work.'}</p></div></section><section class="feature-grid" aria-label="About the exporter"><article><span class="step">01</span><h2>{'Tạo file lịch nhanh' if vi else 'Quick export'}</h2><p>{'Không cần đăng nhập. Dùng file HTML đã xác thực hoặc userId và tokenJWT. Thông tin không được lưu.' if vi else 'No account required. Use a saved authenticated HTML page or userId and tokenJWT. Nothing is stored.'}</p></article><article><span class="step">02</span><h2>{'Bảng điều khiển' if vi else 'Dashboard'}</h2><p>{'Đăng nhập để giữ phiên Phenikaa, tự động đồng bộ và kết nối Google Calendar.' if vi else 'Sign in to keep a Phenikaa session, sync automatically, and connect Google Calendar.'}</p></article><article><span class="step">03</span><h2>{'Riêng tư' if vi else 'Privacy'}</h2><p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p></article></section></main>"""
+        body = f"""{self._navigation(user, identity, "about", language)}<main><section class="landing-hero"><div><h1>{'Lịch học của bạn, dễ mang theo.' if vi else 'Your timetable, made portable.'}</h1><p class="hero-lede">{'Phenikaa Calendar Exporter chuyển lịch học và lịch thi thành các file ICS, XLSX và JSON để bạn dùng ở nơi mình muốn.' if vi else 'Phenikaa Calendar Exporter turns your classes and exams into ICS, XLSX, and JSON files you can use wherever you work.'}</p></div></section><section class="feature-grid" aria-label="About the exporter"><article><h2>{'Tạo file lịch nhanh' if vi else 'Quick export'}</h2><p>{'Không cần đăng nhập. Dùng file HTML đã xác thực hoặc userId và tokenJWT. Thông tin không được lưu.' if vi else 'No account required. Use a saved authenticated HTML page or userId and tokenJWT. Nothing is stored.'}</p></article><article><h2>{'Bảng điều khiển' if vi else 'Dashboard'}</h2><p>{'Đăng nhập để giữ phiên Phenikaa, tự động đồng bộ và kết nối Google Calendar.' if vi else 'Sign in to keep a Phenikaa session, sync automatically, and connect Google Calendar.'}</p></article><article><h2>{'Riêng tư' if vi else 'Privacy'}</h2><p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p></article></section></main>"""
         self._html(handler, 200, self._layout("About", body), no_store=True)
 
     def _get_system_status(self, refresh: bool = False) -> dict[str, Any]:
@@ -1667,7 +1667,6 @@ class ServerApplication:
         <main>
           <div class="section-heading">
             <div>
-              <p class="eyebrow">{eyebrow}</p>
               <h2>{title}</h2>
               <p class="page-description">{desc}</p>
             </div>
@@ -1688,7 +1687,6 @@ class ServerApplication:
             <article class="session-card" style="margin:0;">
               <div class="session-card__head">
                 <div>
-                  <p class="eyebrow">PORTAL</p>
                   <h3 style="margin:0;font-size:1.25rem;">{'Cổng sinh viên Phenikaa' if vi else 'Phenikaa Student Portal'}</h3>
                 </div>
                 <span class="status {p_status_cls}">{p_status_text}</span>
@@ -1704,7 +1702,6 @@ class ServerApplication:
             <article class="session-card" style="margin:0;">
               <div class="session-card__head">
                 <div>
-                  <p class="eyebrow">GOOGLE</p>
                   <h3 style="margin:0;font-size:1.25rem;">{'Dịch vụ Google Calendar' if vi else 'Google Calendar Service'}</h3>
                 </div>
                 <span class="status {g_status_cls}">{g_status_text}</span>
@@ -1719,7 +1716,6 @@ class ServerApplication:
             <article class="session-card" style="margin:0;">
               <div class="session-card__head">
                 <div>
-                  <p class="eyebrow">INFRASTRUCTURE</p>
                   <h3 style="margin:0;font-size:1.25rem;">{'Hạ tầng máy chủ' if vi else 'Server Infrastructure'}</h3>
                 </div>
                 <span class="status status--operational">{'Bình thường' if vi else 'Healthy'}</span>
@@ -2088,7 +2084,6 @@ class ServerApplication:
         <main>
           <div class="section-heading">
             <div>
-              <p class="eyebrow">{eyebrow}</p>
               <h2>{title}</h2>
               <p class="page-description">{description} · <a href="/api/v1/openapi.json" target="_blank" style="text-decoration:underline;">OpenAPI Spec (JSON)</a></p>
             </div>
@@ -2115,7 +2110,6 @@ class ServerApplication:
 
           <!-- Section: API Tokens Management -->
           <section class="settings-card" style="margin-bottom:24px;">
-            <p class="eyebrow">{'KHÓA TRUY CẬP' if vi else 'API KEYS'}</p>
             <h2>{'Quản lý API Token' if vi else 'API Token Management'}</h2>
             <div id="tokens-container" style="margin-top:16px;">
               {token_list_html}
@@ -2177,7 +2171,6 @@ class ServerApplication:
 
           <!-- Section: Quick One-Shot Export -->
           <section class="setup-card" style="margin-bottom:24px;">
-            <p class="eyebrow">{'XUẤT NHANH MỘT LẦN' if vi else 'QUICK ONE-SHOT EXPORT'}</p>
             <h2>{'Xuất lịch trực tiếp từ phiên đào tạo' if vi else 'Direct Calendar Export'}</h2>
             <p style="margin-bottom:16px;color:hsl(var(--foreground));opacity:0.85;font-size:13px;line-height:1.6;">
               {'Dùng mã nguồn HTML trang QLĐT index.aspx hoặc token phiên để xuất ngay tệp lịch (.ics, .xlsx, .json) mà không cần lưu trữ thông tin.' if vi else 'Provide saved QLĐT index.aspx HTML source or current session credentials to download calendar files (.ics, .xlsx, .json) without permanent storage.'}
@@ -2221,7 +2214,6 @@ class ServerApplication:
 
           <!-- Section: Interactive API Playground -->
           <section class="settings-card" style="margin-bottom:40px;">
-            <p class="eyebrow">{'PLAYGROUND & THỬ NGHIỆM' if vi else 'INTERACTIVE PLAYGROUND'}</p>
             <h2>{'Trình chạy thử API trực tiếp' if vi else 'Live API Test Console'}</h2>
             <p style="margin-bottom:18px;color:hsl(var(--foreground));opacity:0.85;font-size:13px;line-height:1.6;">
               {'Chọn endpoint, truyền token và tham số để gửi yêu cầu và nhận kết quả phản hồi thực tế từ máy chủ.' if vi else 'Select an endpoint, supply a token and parameters to execute live requests directly against the server.'}
@@ -2302,7 +2294,6 @@ class ServerApplication:
 
               <!-- Code Snippets (cURL & Fetch) -->
               <div style="border-top:1px solid hsl(var(--border));padding-top:16px;margin-top:8px;">
-                <p class="eyebrow">{'MÃ NGUỒN MẪU' if vi else 'CODE SNIPPETS'}</p>
                 <div style="display:grid;gap:12px;">
                   <div>
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
@@ -2598,12 +2589,14 @@ class ServerApplication:
             f"""<div class="managed-session"><div><strong>{html.escape(str(session["label"]))}</strong><p>{html.escape(self._status_label(str(session["status"]), language))}</p></div><form method="post" action="/sessions/{html.escape(str(session["id"]))}/delete"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--danger">{'Xóa phiên' if vi else 'Delete session'}</button></form></div>"""
             for session in sessions
         )
-        session_management = f"<section class=\"settings-card\"><p class=\"eyebrow\">{'QUẢN LÝ PHIÊN' if vi else 'SESSION MANAGEMENT'}</p><h2>{'Các phiên Phenikaa' if vi else 'Phenikaa sessions'}</h2>{session_settings or f'<p class=\"text-muted\">{"Chưa có phiên nào được kết nối." if vi else "No sessions connected."}</p>'}</section>"
+        no_sessions_text = "Chưa có phiên nào được kết nối." if vi else "No sessions connected."
+        empty_session_markup = f'<p class="text-muted">{no_sessions_text}</p>'
+        session_management = f'<section class="settings-card"><h2>{"Các phiên Phenikaa" if vi else "Phenikaa sessions"}</h2>{session_settings or empty_session_markup}</section>'
         calendar_block = calendar_choice if has_google_calendar else ""
         body = f"""
         {self._navigation(user, identity, "settings", language)}
-        <main><div class="section-heading"><div><p class="eyebrow">{'TÙY CHỈNH' if vi else 'PREFERENCES'}</p><h2>{'Cài đặt' if vi else 'Settings'}</h2></div><span class="section-rule"></span></div>
-        {session_management}<section class="settings-card danger-zone"><p class="eyebrow">{'KHU VỰC NGUY HIỂM' if vi else 'DANGER ZONE'}</p><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}">{calendar_block}<label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
+        <main><div class="section-heading"><div><h2>{'Cài đặt' if vi else 'Settings'}</h2></div><span class="section-rule"></span></div>
+        {session_management}<section class="settings-card danger-zone"><h2>{delete_title}</h2><p class="text-muted">{delete_copy}</p><form method="post" action="/account/delete"><input type="hidden" name="csrf" value="{csrf}">{calendar_block}<label>{'Nhập DELETE để xác nhận' if vi else 'Type DELETE to confirm'} <input name="confirmation" autocomplete="off" required></label><button class="button button--danger">{delete_title}</button></form></section></main>"""
         self._html(handler, 200, self._layout("Settings", body), no_store=True)
 
     def _has_google_calendar(self, sessions: list[dict[str, Any]]) -> bool:
@@ -2643,7 +2636,7 @@ class ServerApplication:
         account = ""
         if user is not None and identity is not None:
             csrf = html.escape(str(identity["csrf"]))
-            account = f"<span>{html.escape(str(user['display_name']))}</span><a class=\"nav-link{' nav-link--active' if active == 'settings' else ''}\" href=\"/settings\">{settings_label}</a><form method=\"post\" action=\"/auth/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button class=\"text-button\">{sign_out}</button></form>"
+            account = f"<span class=\"hidden sm:inline\">{html.escape(str(user['display_name']))}</span><a class=\"nav-link{' nav-link--active' if active == 'settings' else ''}\" href=\"/settings\">{settings_label}</a><form method=\"post\" action=\"/auth/logout\" style=\"margin:0;\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button class=\"text-button\">{sign_out}</button></form>"
         else:
             login_label = ('Đăng nhập bằng Google' if vi else 'Sign in with Google') if self.config.auth_mode == 'google' else ('Đăng nhập' if vi else 'Sign in')
             account = f"<a class=\"button button--primary\" href=\"/auth/login\">{login_label}</a>"
@@ -2708,7 +2701,7 @@ class ServerApplication:
             action = f'<form method="post" action="/account/google/{operation}"><input type="hidden" name="csrf" value="{csrf}"><button class="button button--quiet">{label}</button></form>'
         description = "Lịch được đồng bộ vào tài khoản Google bạn dùng để đăng nhập." if vi else "Your calendar syncs to the same Google account you use to sign in."
         next_step = "Đồng bộ bắt đầu khi tài khoản Phenikaa được kết nối. Đăng xuất không dừng đồng bộ." if vi else "Sync begins once your Phenikaa account is connected. Signing out does not stop sync."
-        return f'<section class="setup-card"><p class="eyebrow">Google Calendar</p><h2>{status}</h2><p><strong>{email}</strong></p><p>Phenikaa Learning Calendar</p><p>{description}</p><p>{next_step}</p>{f"<p>{error}</p>" if error else ""}<div class="action-row">{action}</div></section>'
+        return f'<section class="setup-card"><h2>{status}</h2><p><strong>{email}</strong></p><p>Phenikaa Learning Calendar</p><p>{description}</p><p>{next_step}</p>{f"<p>{error}</p>" if error else ""}<div class="action-row">{action}</div></section>'
 
     def _login_page(self, handler: BaseHTTPRequestHandler, session: dict[str, Any], identity: dict[str, Any]) -> None:
         sid = str(session["id"])
@@ -3030,9 +3023,7 @@ class ServerApplication:
         return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><link rel="stylesheet" href="/static/styles.css"></head><body>{body}</body></html>"""
 
     def _legacy_layout(self, title: str, body: str) -> str:
-        return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title><style>
-        :root{{color-scheme:light;background:aliceblue;color:navy;font:16px/1.5 Arial,sans-serif}}*{{box-sizing:border-box}}body{{margin:0;background:aliceblue}}header,main,footer{{max-width:1180px;margin:auto;padding:24px}}.site-header{{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid lightsteelblue;padding-top:20px;padding-bottom:20px}}.brand{{display:flex;align-items:center;gap:10px;color:navy;text-decoration:none;font-size:12px;letter-spacing:.12em;font-weight:700}}.brand b{{font-weight:400}}.brand-mark{{display:grid;place-items:center;width:30px;height:30px;background:navy;color:white;font-family:Georgia,serif;font-size:18px}}.header-meta{{display:flex;align-items:center;gap:18px;color:slategray;font-size:13px}}.text-button{{border:0;background:transparent;color:navy;padding:0;cursor:pointer;font-size:13px}}.hero{{display:flex;justify-content:center;padding:clamp(50px,9vw,105px) 0 90px;border-bottom:1px solid lightsteelblue}}.eyebrow{{margin:0 0 14px;color:royalblue;font-size:11px;font-weight:700;letter-spacing:.16em}}h1,h2,p{{margin-top:0}}h1{{margin-bottom:24px;color:navy;font-family:Georgia,serif;font-size:clamp(44px,7vw,84px);font-weight:400;line-height:.98;letter-spacing:-.055em}}h1 em{{color:royalblue;font-style:normal}}.hero__lede{{max-width:530px;color:slategray;font-size:18px;line-height:1.6}}.hero__formats{{display:flex;align-items:center;gap:12px;margin-top:34px;color:slategray;font-size:10px;letter-spacing:.14em}}.hero__formats b{{padding:8px 10px;border:1px solid lightsteelblue;background:white;color:navy;font-family:monospace;font-size:12px;letter-spacing:0}}.hero__instrument{{width:100%;max-width:700px;padding:18px;background:navy;color:white;border:1px solid navy;box-shadow:14px 14px 0 lightsteelblue}}.instrument__top,.instrument__readout{{display:flex;justify-content:space-between;gap:12px;font-family:monospace;font-size:10px;letter-spacing:.08em}}.live-dot{{color:lightskyblue}}.instrument__grid{{display:grid;grid-template-columns:38px 1fr;gap:12px;margin:34px 0 24px}}.instrument__axis{{display:flex;flex-direction:column;justify-content:space-between;color:lightskyblue;font:10px/1 monospace}}.instrument__rows{{display:grid;grid-template-columns:repeat(5,1fr);grid-template-rows:repeat(6,26px);gap:5px;background:royalblue;padding:5px}}.instrument__rows i{{display:block;background:white;opacity:.92}}.instrument__rows i:nth-child(2),.instrument__rows i:nth-child(8),.instrument__rows i:nth-child(14){{grid-column:span 2;background:lightskyblue}}.instrument__rows i:nth-child(4),.instrument__rows i:nth-child(10){{background:cornflowerblue}}.instrument__readout{{border-top:1px solid royalblue;padding-top:14px}}.instrument__readout div{{display:grid;gap:5px}}.instrument__readout small{{color:lightskyblue;font-size:9px}}.instrument__readout strong{{font-size:11px}}.section-heading{{display:flex;align-items:end;gap:24px;padding:65px 0 8px}}h2{{color:navy;font-family:Georgia,serif;font-size:32px;font-weight:400;letter-spacing:-.03em}}.section-rule{{height:1px;flex:1;margin-bottom:12px;background:lightsteelblue}}article,section{{background:white;padding:28px;margin:18px 0;border:1px solid lightsteelblue;box-shadow:0 8px 24px rgba(0,0,128,.05)}}.setup-card{{max-width:920px}}.setup-card p:not(.eyebrow),.empty-state p:not(.eyebrow){{max-width:620px;color:slategray}}form{{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:18px 0}}label{{display:grid;gap:6px;color:slategray;font-size:12px;font-weight:700}}input,button{{font:inherit;padding:10px 12px;border:1px solid lightsteelblue}}input{{background:white;color:navy}}.button{{display:inline-block;text-decoration:none;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.02em}}.button--primary{{background:navy;color:white;border-color:navy}}.button--secondary{{background:royalblue;color:white;border-color:royalblue}}.button--quiet{{background:white;color:navy}}.button--danger{{background:white;color:firebrick;border-color:rosybrown}}.session-card__head,.session-card__links,.session-card__footer{{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}}.session-card__head h2{{margin-bottom:0}}.status{{padding:6px 9px;background:aliceblue;color:royalblue;font:11px monospace;letter-spacing:.08em}}.status--needs_human{{color:firebrick;background:mistyrose}}.session-card__error{{min-height:1.5em;color:firebrick}}.session-card__links{{justify-content:flex-start;margin:22px 0}}.integration{{padding:15px 0;border-top:1px solid lightsteelblue;border-bottom:1px solid lightsteelblue}}.integration p{{margin:0;color:slategray;font-size:13px}}.integration a{{color:royalblue}}.range-form{{margin-bottom:8px}}.session-card__footer{{justify-content:flex-start;margin-top:10px}}.empty-state{{border-style:dashed}}.empty-state h2{{margin-bottom:8px}}a{{color:royalblue}}code{{overflow-wrap:anywhere}}footer{{font-size:.9rem;border-top:1px solid lightsteelblue;color:slategray}}footer a{{margin-right:16px}}img{{display:block;width:100%;background:black;outline:none;min-height:160px}}@media(max-width:760px){{header,main,footer{{padding-left:18px;padding-right:18px}}.site-header{{align-items:flex-start}}.header-meta{{align-items:flex-end;flex-direction:column;gap:5px}}.hero{{padding-top:55px;padding-bottom:60px}}.hero__instrument{{box-shadow:8px 8px 0 lightsteelblue}}.hero__formats{{align-items:flex-start;flex-wrap:wrap}}.hero__formats span{{width:100%}}.section-heading{{padding-top:45px}}.section-rule{{display:none}}form label,form input,form .button{{width:100%}}.session-card__links .button{{width:100%;text-align:center}}.range-form{{display:grid}}}}
-         </style><style>:root{{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}}body{{font-family:inherit;letter-spacing:-.01em}}h1,h2{{font-family:inherit;font-weight:700;letter-spacing:-.04em}}code,.instrument__top,.instrument__readout,.instrument__axis,.status,.eyebrow,.hero__formats,.brand{{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace}}article,section{{border-radius:16px;box-shadow:0 12px 30px rgba(0,0,128,.06)}}.site-header{{border-radius:0 0 16px 16px}}.brand-mark{{border-radius:9px}}input,button,.button{{border-radius:10px}}.button--primary,.button--secondary{{box-shadow:0 4px 10px rgba(0,0,128,.12)}}.status{{border-radius:999px}}.setup-card,.session-card,.empty-state{{padding:32px}}footer{{display:none}}</style></head><body>{body}</body></html>"""
+        return self._layout(title, body)
 
     def _stylesheet(self, handler: BaseHTTPRequestHandler) -> None:
         path = Path(__file__).with_name("static") / "styles.css"
