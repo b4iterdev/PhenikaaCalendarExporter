@@ -1,0 +1,24 @@
+[package]
+name = "phenikaa-core"
+version = "1.0.0"
+edition = "2021"
+description = "Core Phenikaa calendar models, crypto codecs, API client, and file exporters"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+thiserror = "2.0"
+rust_xlsxwriter = "0.80"
+flate2 = "1.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+httpmock = "0.7"
+tempfile = "3"
+

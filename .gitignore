@@ -26,3 +26,9 @@ phenikaa_calendar.json
 .coverage
 .playwright-mcp/
 .omo/
+target/
+build/
+.impeccable/
+presentation.html
+presentation.md
+report/

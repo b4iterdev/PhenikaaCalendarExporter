@@ -3,28 +3,32 @@ FROM node:22-alpine AS css-builder
 WORKDIR /build
 COPY package.json package-lock.json tailwind.config.js ./
 COPY frontend ./frontend
-COPY server ./server
+COPY crates ./crates
+COPY server/static ./server/static
 RUN npm ci && npm run build
 
-FROM python:3.12-slim
+FROM rust:1.88-bookworm AS rust-builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PHENIKAA_SERVER_HOST=0.0.0.0 \
-    PHENIKAA_SERVER_STATE=/data \
-    PHENIKAA_BROWSER_NO_SANDBOX=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+ENV PHENIKAA_SERVER_HOST=0.0.0.0 \
+    PHENIKAA_SERVER_STATE=/data
 
 WORKDIR /app
 
-COPY pyproject.toml setup.py README.md ./
-COPY phenikaa_exporter.py phenikaa_login.py ./
-COPY server ./server
-COPY --from=css-builder /build/server/static/styles.css ./server/static/styles.css
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir '.[server]' \
-    && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/* /tmp/*
+COPY --from=rust-builder /build/target/release/phenikaa-server /usr/local/bin/phenikaa-calendar-server
+COPY --from=rust-builder /build/target/release/phenikaa-cli /usr/local/bin/phenikaa-calendar
+COPY --from=css-builder /build/server/static/styles.css /app/server/static/styles.css
 
 RUN useradd --create-home --uid 1000 phenikaa \
     && mkdir -p /data \
@@ -35,6 +39,6 @@ VOLUME /data
 EXPOSE 8416
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import os, sys, urllib.request; port = os.environ.get('PHENIKAA_SERVER_PORT', '8416'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:' + port + '/healthz', timeout=4).status == 200 else 1)"
+    CMD curl -f http://127.0.0.1:${PHENIKAA_SERVER_PORT:-8416}/api/v1/health || exit 1
 
 ENTRYPOINT ["phenikaa-calendar-server"]

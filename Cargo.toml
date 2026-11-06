@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/phenikaa-core",
+    "crates/phenikaa-cli",
+    "crates/phenikaa-server",
+]
